@@ -1,0 +1,22 @@
+name: Sync upstream dev-sidecar
+on:
+  schedule:
+    - cron: '30 3 * * *'   # 每天北京时间 11:30
+  workflow_dispatch: {}
+permissions:
+  contents: write
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+      - uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
+        with:
+          upstream_sync_repo: docmirror/dev-sidecar
+          upstream_sync_branch: master
+          target_sync_branch: master
+          git_push_args: --force-with-lease
+
