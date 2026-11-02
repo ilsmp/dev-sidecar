@@ -19,4 +19,17 @@ jobs:
           upstream_sync_branch: master
           target_sync_branch: master
           git_push_args: --force-with-lease
+      # 同步官方后, 把 master 自动合并进功能开发分支(快进或保留合并提交)
+      - name: Merge master into feature branch
+        if: success()
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin codex/fallback-adapter || true
+          git checkout codex/fallback-adapter || git checkout -b codex/fallback-adapter origin/master
+          git merge master --no-edit || {
+            echo '::error::功能分支合并冲突, 需要手动处理'
+            exit 1
+          }
+          git push origin codex/fallback-adapter
 
