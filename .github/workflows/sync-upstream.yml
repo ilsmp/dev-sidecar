@@ -25,11 +25,11 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git fetch origin codex/fallback-adapter || true
-          git checkout codex/fallback-adapter || git checkout -b codex/fallback-adapter origin/master
+          git fetch origin adapter || true
+          git checkout adapter || git checkout -b adapter origin/master
           git merge master --no-edit || {
             echo '::error::功能分支合并冲突, 需要手动处理'
             exit 1
           }
-          git push origin codex/fallback-adapter
+          git push origin adapter
 
