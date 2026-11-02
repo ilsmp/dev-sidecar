@@ -6,6 +6,7 @@ export default function createMenus (app) {
     { title: 'Git.exe代理', path: '/plugin/git', icon: 'github' },
     { title: 'PIP加速', path: '/plugin/pip', icon: 'bulb' },
     { title: 'Xget 加速', path: '/plugin/xget', icon: 'global' },
+    { title: '兜底适配器', path: '/plugin/adapter', icon: 'api' },
     { title: '网络检测', path: '/plugin/free-eye', icon: 'eye' },
     { title: '网页诊断', path: '/plugin/web-diagnostics', icon: 'global' },
   ]
