@@ -17,14 +17,11 @@ import log from '../../utils/util.log.gui.js'
 import dateUtil from '@blue-frontier/dev-sidecar/src/utils/util.date.js'
 import coreConfig from '@blue-frontier/dev-sidecar/src/config/index.js'
 import serviceGroup from '@blue-frontier/dev-sidecar/src/service-group.js'
+import adapterApi from './adapter-manager.js'
 
 const { defaultConfig: coreDefaultConfig } = coreConfig
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const mitmproxyPath = path.join(__dirname, '../mitmproxy.js')
-// 兜底适配器 extra/adapter 目录(打包后 resources/extra/adapter, 开发时 packages/gui/extra/adapter)
-const adapterDir = path.join(path.dirname(mitmproxyPath), '..', 'extra', 'adapter')
-const adapterServerJs = path.join(adapterDir, 'server.js')
-const adapterConfJson = path.join(adapterDir, 'conf.json')
 // extra/ 在打包后位于 resources/extra（extraResources，asar 外）；开发时在项目根 extra/
 // 不能用 getAppPath()：打包后它是 app.asar，exe 在 asar 内无法执行
 process.env.DS_EXTRA_PATH = app.isPackaged
@@ -356,140 +353,10 @@ const localApi = {
     },
   },
   /**
-   * 兜底适配器(二次开发新增): 管理 extra/adapter/server.js 子进程
+   * 兜底适配器(二次开发新增): 独立模块, 官方升级合并零冲突
    * 功能: DoH 直连优先(超时可配) -> 失败/403/451 自动降级 -> upstream 代理(可配, 换任意 VPN 只改 upstream)
-   * 域名级 directSkipHosts: 命中域名跳过直连直接走 upstream(解决"直连可达但内容被地区封锁")
    */
-  adapter: {
-    _proc: null,
-    _conf () {
-      try {
-        return JSON.parse(fs.readFileSync(adapterConfJson, 'utf8'))
-      } catch {
-        return null
-      }
-    },
-    confGet () {
-      const conf = this._conf()
-      if (!conf) {
-        // 首次使用: 从内置默认值生成 conf.json
-        const def = {
-          port: 8470,
-          secret: require('node:crypto').randomBytes(6).toString('hex'),
-          password: require('node:crypto').randomBytes(12).toString('hex'),
-          upstream: 'http://127.0.0.1:7890',
-          directTimeoutMs: 1000,
-          watchdogIntervalMs: 3000,
-          vpnApp: '',
-          vpnAutoRestart: false,
-          probeUrl: 'https://www.cloudflare.com/',
-          vpnCorePattern: 'QianmoCore|clash-meta|mihomo|FlClash',
-          directSkipHosts: [],
-        }
-        fs.mkdirSync(adapterDir, { recursive: true })
-        fs.writeFileSync(adapterConfJson, JSON.stringify(def, null, 2))
-        return def
-      }
-      return conf
-    },
-    confSave (newConf) {
-      const cur = this.confGet()
-      const merged = Object.assign({}, cur, newConf || {})
-      // 安全校验: 端口/超时必须是数字
-      merged.port = Number.parseInt(merged.port) || 8470
-      merged.directTimeoutMs = Number.parseInt(merged.directTimeoutMs) || 1000
-      if (merged.port < 1024 || merged.port > 65535) {
-        throw new Error('端口必须在 1024-65535 之间')
-      }
-      if (!Array.isArray(merged.directSkipHosts)) {
-        merged.directSkipHosts = []
-      }
-      merged.directSkipHosts = merged.directSkipHosts.map(s => String(s).trim().toLowerCase()).filter(Boolean)
-      fs.writeFileSync(adapterConfJson, JSON.stringify(merged, null, 2))
-      return merged
-    },
-    status () {
-      const conf = this._conf()
-      const running = !!(this._proc && this._proc.pid && !this._proc.killed)
-      let listening = false
-      if (running && conf) {
-        try {
-          const { execSync } = require('node:child_process')
-          execSync(`nc -z -w 1 127.0.0.1 ${conf.port}`, { stdio: 'ignore' })
-          listening = true
-        } catch { /* 未监听 */ }
-      }
-      return { running, listening, conf, pid: running ? this._proc.pid : null }
-    },
-    async start () {
-      if (this._proc && this._proc.pid && !this._proc.killed) {
-        return { ok: true, already: true }
-      }
-      const conf = this.confGet()
-      if (!fs.existsSync(adapterServerJs)) {
-        throw new Error(`适配器 server.js 不存在: ${adapterServerJs}`)
-      }
-      fs.mkdirSync(adapterDir, { recursive: true })
-      const { spawn } = require('node:child_process')
-      const out = fs.openSync(path.join(adapterDir, 'adapter.out.log'), 'a')
-      const err = fs.openSync(path.join(adapterDir, 'adapter.err.log'), 'a')
-      this._proc = spawn(process.execPath, [adapterServerJs], { cwd: adapterDir, stdio: ['ignore', out, err], detached: false })
-      this._proc.on('exit', () => {
-        this._proc = null
-      })
-      // 等待端口就绪(最多 5s)
-      for (let i = 0; i < 10; i++) {
-        await new Promise(r => setTimeout(r, 500))
-        try {
-          const { execSync } = require('node:child_process')
-          execSync(`nc -z -w 1 127.0.0.1 ${conf.port}`, { stdio: 'ignore' })
-          return { ok: true, pid: this._proc ? this._proc.pid : null }
-        } catch { /* 继续等 */ }
-      }
-      return { ok: false, msg: '适配器 5 秒内未监听, 请查看 extra/adapter/adapter.err.log' }
-    },
-    stop () {
-      if (this._proc && this._proc.pid) {
-        try {
-          this._proc.kill()
-        } catch { /* 已退出 */ }
-        this._proc = null
-      }
-      return { ok: true }
-    },
-    restart () {
-      this.stop()
-      return this.start()
-    },
-    logs () {
-      const p = path.join(adapterDir, 'adapter.out.log')
-      try {
-        const stat = fs.statSync(p)
-        const size = stat.size
-        const fd = fs.openSync(p, 'r')
-        const buf = Buffer.alloc(Math.min(size, 64 * 1024))
-        fs.readSync(fd, buf, 0, buf.length, Math.max(0, size - buf.length))
-        fs.closeSync(fd)
-        return buf.toString('utf8')
-      } catch {
-        return ''
-      }
-    },
-    // 与官方 overwall 插件对接: 把适配器注册为 overwall 自定义服务器(merge 不覆盖用户已有配置)
-    async integrateOverwall () {
-      const conf = this.confGet()
-      const cfg = DevSidecar.api.config.get()
-      const ow = lodash.get(cfg, 'plugin.overwall')
-      if (!ow) {
-        throw new Error('找不到 plugin.overwall 配置')
-      }
-      ow.server = ow.server || {}
-      const key = '127.0.0.1'
-      ow.server[key] = { id: 1, type: 'path', port: conf.port, path: conf.secret, password: conf.password }
-      await DevSidecar.api.config.save(cfg)
-      return { ok: true, server: ow.server[key] }
-    },
-  },
+  adapter: adapterApi,
   shell: {
     /**
      * 使用 Electron 主进程原生 API 打开文件（避免 cmd.exe start 权限问题）

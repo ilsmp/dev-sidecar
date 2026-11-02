@@ -1,31 +1,41 @@
 #!/usr/bin/env node
 /**
  * DevSidecar 二层代理适配器：DoH 直连优先 + 兜底上游(可配置/热更新) + 重试 + 系统代理看门狗
- * 协议: https://127.0.0.1:8470/{secret}/{真实域名}{原始path} + header dspassword
+ * 协议: http://127.0.0.1:{port}/{secret}/{真实域名}[:port]{原始path} + header dspassword
  */
 'use strict';
 const http = require('node:http');
 const https = require('node:https');
 const net = require('node:net');
 const tls = require('node:tls');
-const zlib = require('node:zlib');
 const fs = require('node:fs');
 const path = require('node:path');
-const { execSync } = require('node:child_process');
+const crypto = require('node:crypto');
 
-const CONF = JSON.parse(fs.readFileSync(path.join(__dirname, 'conf.json'), 'utf8'));
-let UP = new URL(CONF.upstream || 'http://127.0.0.1:7890');
-let DIRECT_TIMEOUT = CONF.directTimeoutMs || 6000;
-let FALLBACK_TIMEOUT = CONF.fallbackTimeoutMs || 25000;
+const CONF_PATH = path.join(__dirname, 'conf.json');
+const PID_PATH = path.join(__dirname, 'adapter.pid');
+const LOG_PATH = path.join(__dirname, 'adapter.log');
+const CONF = {};
+let UP = new URL('http://127.0.0.1:7890');
+function applyConf(next) {
+  CONF.port = Number(next.port) || 8470;
+  CONF.secret = String(next.secret || '');
+  CONF.password = String(next.password || '');
+  CONF.upstream = String(next.upstream || 'http://127.0.0.1:7890');
+  CONF.upstreamType = String(next.upstreamType || 'auto');
+  CONF.directTimeoutMs = Number(next.directTimeoutMs) || 1000;
+  CONF.fallbackTimeoutMs = Number(next.fallbackTimeoutMs) || 25000;
+  CONF.requestBudgetMs = Number(next.requestBudgetMs) || 30000;
+  CONF.watchdogIntervalMs = Math.max(1000, Number(next.watchdogIntervalMs) || 3000);
+  const arr = Array.isArray(next.directSkipHosts) ? next.directSkipHosts : [];
+  CONF.directSkipHosts = arr.map((s) => String(s).toLowerCase()).filter(Boolean);
+  UP = new URL(CONF.upstream);
+  directSkipHosts = new Set(CONF.directSkipHosts);
+}
+
 const MAX_BODY = 64 * 1024 * 1024;
-const LOG_FILE = path.join(__dirname, 'adapter.log');
 // 指定域名强制走兜底(不走直连): conf.json directSkipHosts 数组, 后缀匹配, 改配置约3秒热生效
 let directSkipHosts = new Set();
-function rebuildDirectSkipHosts() {
-  const arr = Array.isArray(CONF.directSkipHosts) ? CONF.directSkipHosts : [];
-  directSkipHosts = new Set(arr.map((s) => String(s).toLowerCase()).filter(Boolean));
-}
-rebuildDirectSkipHosts();
 function hostSkipsDirect(h) {
   h = String(h || '').toLowerCase();
   if (!h) return false;
@@ -34,12 +44,22 @@ function hostSkipsDirect(h) {
   return false;
 }
 
+let logStream = null;
 function log() {
   const args = Array.prototype.slice.call(arguments);
   const line = '[' + new Date().toISOString() + '] ' + args.map((a) => (a instanceof Error ? a.message + (a.code ? '/' + a.code : '') : String(a))).join(' ') + '\n';
   try {
-    if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 2 * 1024 * 1024) fs.writeFileSync(LOG_FILE, '');
-    fs.appendFileSync(LOG_FILE, line);
+    if (fs.existsSync(LOG_PATH) && fs.statSync(LOG_PATH).size > 5 * 1024 * 1024) {
+      const fd = fs.openSync(LOG_PATH, 'r');
+      const size = fs.fstatSync(fd).size;
+      const buf = Buffer.alloc(size - 2 * 1024 * 1024);
+      fs.readSync(fd, buf, 0, buf.length, 2 * 1024 * 1024);
+      fs.closeSync(fd);
+      fs.writeFileSync(LOG_PATH, buf);
+      if (logStream) { try { logStream.destroy(); } catch (e) {} logStream = null; }
+    }
+    if (!logStream || logStream.destroyed) logStream = fs.createWriteStream(LOG_PATH, { flags: 'a' });
+    logStream.write(line);
   } catch (e) {}
 }
 
@@ -48,70 +68,47 @@ process.on('unhandledRejection', (e) => log('unhandledRejection', e));
 
 // ---------- conf.json 热更新（改上游端口/超时/密钥后约3秒生效） ----------
 let confMtime = 0;
-try { confMtime = fs.statSync(path.join(__dirname, 'conf.json')).mtimeMs; } catch (e) {}
+try { confMtime = fs.statSync(CONF_PATH).mtimeMs; } catch (e) {}
 setInterval(() => {
   try {
-    const st = fs.statSync(path.join(__dirname, 'conf.json'));
+    const st = fs.statSync(CONF_PATH);
     if (st.mtimeMs === confMtime) return;
     confMtime = st.mtimeMs;
-    const next = JSON.parse(fs.readFileSync(path.join(__dirname, 'conf.json'), 'utf8'));
+    const next = JSON.parse(fs.readFileSync(CONF_PATH, 'utf8'));
     const oldPort = Number(CONF.port || 8470);
-    Object.assign(CONF, next);
-    UP = new URL(CONF.upstream || 'http://127.0.0.1:7890');
-    DIRECT_TIMEOUT = CONF.directTimeoutMs || 6000;
-    FALLBACK_TIMEOUT = CONF.fallbackTimeoutMs || 25000;
-    const nextWatchdogMs = Math.max(1000, Number(CONF.watchdogIntervalMs) || 3000);
-    if (nextWatchdogMs !== WATCHDOG_MS) {
-      WATCHDOG_MS = nextWatchdogMs;
-      if (watchdogTimer) clearInterval(watchdogTimer);
-      watchdogTimer = setInterval(watchdogTick, WATCHDOG_MS);
-      log('watchdog interval -> ' + WATCHDOG_MS + 'ms');
-    }
+    applyConf(next);
     modeCache = null;
-    rebuildDirectSkipHosts();
-    log('CONFIG-RELOADED', 'upstream=' + UP.href, 'directTimeoutMs=' + DIRECT_TIMEOUT, 'port=' + CONF.port, 'directSkipHosts=' + directSkipHosts.size);
+    log('CONFIG-RELOADED', 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'port=' + CONF.port, 'directSkipHosts=' + directSkipHosts.size);
     if (oldPort !== Number(CONF.port || 8470)) {
       server.close(() => {});
-      server.listen(Number(CONF.port || 8470), '127.0.0.1', () => log('listening (https)', '127.0.0.1:' + (CONF.port || 8470)));
+      server.listen(Number(CONF.port || 8470), '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + (CONF.port || 8470)));
     }
   } catch (e) { log('config reload error', e); }
 }, 3000);
 
-// ---------- 系统代理看门狗：DevSidecar 在跑但系统代理被清时恢复 31181，并带本地/内网豁免 ----------
-const BYPASS = ['localhost', '127.0.0.1', '127.*', '*.local', '192.168.*', '10.*', '172.16.*', '172.17.*', '172.18.*', '172.19.*', '172.20.*', '172.21.*', '172.22.*', '172.23.*', '172.24.*', '172.25.*', '172.26.*', '172.27.*', '172.28.*', '172.29.*', '172.30.*', '172.31.*', '169.254.*'];
-let WATCHDOG_MS = Math.max(1000, Number(CONF.watchdogIntervalMs) || 3000);
-let watchdogTimer = null;
-function watchdogTick() {
-  try {
-    let out = '';
-    try { out = execSync('scutil --proxy', { timeout: 3000 }).toString(); } catch (e) { return; }
-    let dsUp = false;
-    try { execSync('pgrep -f "dev-sidecar.app/Contents/MacOS/dev-sidecar"', { timeout: 3000, stdio: 'ignore' }); dsUp = true; } catch (e) {}
-    const httpOk = /HTTPEnable : 1/.test(out) && /HTTPPort : 31181/.test(out);
-    const httpsOk = /HTTPSEnable : 1/.test(out) && /HTTPSPort : 31181/.test(out);
-    if (dsUp && (!httpOk || !httpsOk)) {
-      const setCmd = 'networksetup -setwebproxy "Wi-Fi" 127.0.0.1 31181 && networksetup -setsecurewebproxy "Wi-Fi" 127.0.0.1 31181 && networksetup -setproxybypassdomains "Wi-Fi" ' + BYPASS.join(' ');
-      execSync(setCmd, { timeout: 6000 });
-      log('WATCHDOG: system proxy restored -> DevSidecar 31181 (http=' + httpOk + ' https=' + httpsOk + ')');
-    }
-  } catch (e) { log('watchdog error', e); }
-}
-watchdogTimer = setInterval(watchdogTick, WATCHDOG_MS);
-
-// ---------- DoH 解析（阿里公共 DNS，避免本地 DNS 污染） ----------
+// ---------- 缓存清扫(10分钟一次, 防止长驻进程内存膨胀) ----------
 const dnsCache = new Map();
-// 直连污染黑名单: 域名+IP 维度, 10分钟内不再尝试该假IP(污染IP连了也是死)
+const cleanDnsCache = new Map();
 const blockedIps = new Map();
 const directFails = new Map();
 const directSkip = new Map();
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, v] of dnsCache) { if (now - v.ts > 600000) dnsCache.delete(k); }
+  for (const [k, v] of cleanDnsCache) { if (now - v.ts > 600000) cleanDnsCache.delete(k); }
+  for (const [k, v] of blockedIps) { if (now - v.ts > 600000) blockedIps.delete(k); }
+  for (const [k, v] of directSkip) { if (now > v) directSkip.delete(k); }
+}, 600000);
+
+// ---------- DoH 解析(阿里公共 DNS, IP 直连避免系统 DNS 污染) ----------
 function blockIp(host, ip, reason) {
   if (!ip) return;
-  blockedIps.set(host + '|' + ip, { ts: Date.now(), reason: reason || '' });
+  blockedIps.set(host + '|' + ip, Date.now());
 }
 function isBlocked(host, ip) {
-  const hit = blockedIps.get(host + '|' + ip);
-  if (!hit) return false;
-  if (Date.now() - hit.ts > 600000) { blockedIps.delete(host + '|' + ip); return false; }
+  const ts = blockedIps.get(host + '|' + ip);
+  if (ts === undefined) return false;
+  if (Date.now() - ts > 600000) { blockedIps.delete(host + '|' + ip); return false; }
   return true;
 }
 function dohResolve(hostname) {
@@ -154,7 +151,6 @@ function dohResolve(hostname) {
 // ---------- 隧道内干净 DoH: 经兜底隧道连 1.1.1.1(IP直连,VPN无需解析域名) ----------
 // 背景: VPN 本地分流对部分域名(如 ws.chatgpt.com)会解析到污染IP再经节点连死地址;
 // 适配器自己解析干净IP后按 IP CONNECT,SNI/Host 保留原域名,对 VPN 零改动
-const cleanDnsCache = new Map();
 function cleanResolve(hostname) {
   return new Promise(async (resolve) => {
     try {
@@ -362,7 +358,7 @@ function httpsOver(connectFn, targetHost, targetPort, method, reqPath, headers, 
         headers,
         // 注意: 不能设 agent:false —— 那会忽略 createConnection 改为自行 net.connect(系统DNS会被污染)
         createConnection: connectFn,
-        timeout: timeoutMs || DIRECT_TIMEOUT,
+        timeout: timeoutMs || CONF.directTimeoutMs,
         maxHeaderSize: 65536,
       },
       (res) => { clearTimeout(hardTo); req.setTimeout(0); resolve(res); }
@@ -370,7 +366,7 @@ function httpsOver(connectFn, targetHost, targetPort, method, reqPath, headers, 
     req.on('timeout', () => req.destroy(new Error('request timeout')));
     req.on('error', (e) => { clearTimeout(hardTo); reject(e); });
     // 硬超时: 空闲超时事件不覆盖所有挂起场景(建连/TLS阶段),必须兜底
-    const hardTo = setTimeout(() => req.destroy(new Error('hard timeout')), (timeoutMs || FALLBACK_TIMEOUT) + 2000);
+    const hardTo = setTimeout(() => req.destroy(new Error('hard timeout')), (timeoutMs || CONF.fallbackTimeoutMs) + 2000);
     if (bodyBuf && bodyBuf.length) req.write(bodyBuf);
     req.end();
   });
@@ -380,7 +376,7 @@ function directConnect(ip, targetHost, targetPort) {
   return (opts, cb) => {
     const s = tls.connect({ host: ip || targetHost, port: targetPort, servername: targetHost, ALPNProtocols: ['http/1.1'] }, () => cb(null, s));
     s.once('error', cb);
-    s.setTimeout(DIRECT_TIMEOUT, () => s.destroy(new Error('direct connect timeout')));
+    s.setTimeout(CONF.directTimeoutMs, () => s.destroy(new Error('direct connect timeout')));
   };
 }
 
@@ -390,9 +386,6 @@ function socketConnect(sock) {
 
 const HOP_BY_HOP = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade']);
 function relayResponse(upRes, res) {
-  let sseLen = 0;
-  upRes.on('end', () => log('STREAM-END', 'ok'));
-  upRes.on('error', (e) => log('STREAM-ERR', e && e.message));
   const h = {};
   for (const [k, v] of Object.entries(upRes.headers)) {
     if (!HOP_BY_HOP.has(k.toLowerCase())) h[k] = v;
@@ -400,37 +393,11 @@ function relayResponse(upRes, res) {
   // SSE关键修复: 每条事件流独占连接, 防止keep-alive隧道被长流占用后同隧道请求饿死/EPIPE
   const isSSE = /text\/event-stream/i.test(upRes.headers['content-type'] || '');
   if (isSSE) {
-    log('SSE-HDR', 'status=' + upRes.statusCode, 'ct=' + (upRes.headers['content-type'] || ''), 'ce=' + (upRes.headers['content-encoding'] || 'none'), 'cl=' + (upRes.headers['content-length'] || 'none'), 'te=' + (upRes.headers['transfer-encoding'] || 'none'));
     h['connection'] = 'close';
     delete h['content-length'];
-    log('SSE-RELAY', 'connection=close', String(upRes.req && upRes.req.path || '').slice(0, 60));
-  }
-  if (isSSE) {
-    const sseChunks = [];
-    let sseLen = 0;
-    let clientGone = false;
-    res.on('close', () => { clientGone = true; });
-    upRes.on('data', (c) => { if (sseLen < 262144) { sseChunks.push(c); sseLen += c.length; } });
-    upRes.on('end', () => {
-      const raw = Buffer.concat(sseChunks);
-      let txt = raw;
-      try { txt = zlib.gunzipSync(raw); } catch (e) { log('SSE-GUNZIP-FAIL', e.message, 'magic=' + raw.slice(0, 4).toString('hex')); }
-      log('SSE-BODY', 'raw=' + raw.length, 'decoded=' + txt.length, 'clientGone=' + clientGone);
-      log('SSE-HEAD', txt.toString('utf8').slice(0, 300).replace(/\n/g, ' | '));
-      log('SSE-TAIL', txt.toString('utf8').slice(-300).replace(/\n/g, ' | '));
-      try { require('fs').writeFileSync('/tmp/ds-last-sse.txt', txt); } catch (e) {}
-    });
-    const dumpSSE = (tag) => {
-      if (!sseChunks.length) return;
-      const raw = Buffer.concat(sseChunks);
-      let txt = raw;
-      try { txt = zlib.gunzipSync(raw); } catch (e) {}
-      try { require('fs').writeFileSync('/tmp/ds-last-sse-' + tag + '.txt', txt); } catch (e) {}
-    };
-    upRes.on('close', () => { if (!upRes.complete) { log('SSE-CLOSE-INCOMPLETE', 'raw=' + sseLen); dumpSSE('incomplete'); } });
   }
   let relayDone = false;
-  res.on('close', () => { if (!relayDone && !upRes.complete) { log('SSE-CLOSE-CLIENT', 'raw-so-far=' + (sseLen || 0)); upRes.destroy(); } });
+  res.on('close', () => { if (!relayDone && !upRes.complete) upRes.destroy(); });
   res.writeHead(upRes.statusCode, upRes.statusMessage || '', h);
   upRes.pipe(res);
   upRes.on('error', () => res.destroy());
@@ -439,18 +406,47 @@ function relayResponse(upRes, res) {
 
 // 回环/内网目标判定: 这些地址永远不该被转发到兜底节点
 function isLocalHost(h) {
-  if (h === "localhost" || h.endsWith(".localhost") || h.endsWith(".local")) return true;
-  const ip = h.replace(/^\[|\]$/g, "");
+  if (h === 'localhost' || h.endsWith('.localhost') || h.endsWith('.local')) return true;
+  const ip = h.replace(/^\[|\]$/g, '');
   if (!net.isIP(ip)) return false;
-  return ip === "::1" || ip.startsWith("127.") || ip.startsWith("10.") || ip.startsWith("192.168.") || ip.startsWith("169.254.") || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+  if (ip === '::1' || ip === '0.0.0.0') return true;
+  if (net.isIPv4(ip)) {
+    return ip.startsWith('127.') || ip.startsWith('10.') || ip.startsWith('192.168.') ||
+      ip.startsWith('169.254.') || /^172\.(1[6-9]|2\d|3[01])\./.test(ip);
+  }
+  const low = ip.toLowerCase();
+  return /^f[cd][0-9a-f]{2}:/.test(low) || /^fe[89ab]/.test(low);
 }
 
-const TLS_OPTS = { key: fs.readFileSync(path.join(__dirname, 'server.key')), cert: fs.readFileSync(path.join(__dirname, 'server.pem')), maxHeaderSize: 65536 };
+try {
+  applyConf(JSON.parse(fs.readFileSync(CONF_PATH, 'utf8')));
+} catch (e) {
+  console.error('[adapter] FATAL conf.json unreadable:', e.message);
+  process.exit(1);
+}
 
-const server = https.createServer(TLS_OPTS, async (req, res) => {
+function timingSafeEq(a, b) {
+  const ab = Buffer.from(String(a || ''));
+  const bb = Buffer.from(String(b || ''));
+  if (ab.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ab, bb);
+}
+
+// 明文 http(仅 127.0.0.1): 本地回环无证书, 从根上消除 UNABLE_TO_VERIFY_LEAF_SIGNATURE
+const server = http.createServer(async (req, res) => {
+  // 健康检查(管理器收养/启动探测用)
+  if (req.url === '/healthz' || req.url.startsWith('/healthz?')) {
+    const q = new URL(req.url, 'http://127.0.0.1').searchParams.get('secret');
+    if (CONF.secret && q === CONF.secret) {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      return res.end(JSON.stringify({ ok: true, secret: CONF.secret, pid: process.pid }));
+    }
+    res.writeHead(403);
+    return res.end('forbidden');
+  }
   const m = /^\/([^/]+)\/([^/:]+)(?::([0-9]+))?(\/.*)?$/.exec(req.url);
   if (!m) { log('REJECT-nopath', req.url.slice(0, 120)); return res.writeHead(404).end('not found'); }
-  if (m[1] !== CONF.secret || req.headers.dspassword !== CONF.password) { log('REJECT-auth', req.url.slice(0, 60)); return res.writeHead(403).end('forbidden'); }
+  if (m[1] !== CONF.secret || !timingSafeEq(req.headers.dspassword, CONF.password)) { log('REJECT-auth', req.url.slice(0, 60)); return res.writeHead(403).end('forbidden'); }
   const host = m[2];
   const port = m[3] ? Number(m[3]) : 443;
   const reqPath = m[4] || '/';
@@ -478,16 +474,8 @@ const server = https.createServer(TLS_OPTS, async (req, res) => {
     headers['content-length'] = String(size);
   }
 
-  // SDK-EXC: 抓取前端异常上报的明文堆栈(gzip 解压后记录)
-  if (bodyBuf && /sdk_exception/.test(reqPath)) {
-    let txt = bodyBuf;
-    try { txt = zlib.gunzipSync(bodyBuf); } catch (e) {}
-    log('SDK-EXC', String(reqPath).slice(0, 40), txt.toString('utf8').slice(0, 1500));
-  }
-
   const t0 = Date.now();
-  const REQ_BUDGET_MS = CONF.requestBudgetMs || 30000;
-  const directSkipUntil = directSkip.get(host);
+    const directSkipUntil = directSkip.get(host);
   const directAlive = !(directSkipUntil && Date.now() < directSkipUntil);
   let directErr = null;
   if (directAlive && hostSkipsDirect(host)) {
@@ -499,7 +487,7 @@ const server = https.createServer(TLS_OPTS, async (req, res) => {
     let directBlocked = false; // 直连返回了地区封锁类状态码(403/451), 需要兜底节点出口重试
     for (const ip of candidates) {
       try {
-        const upRes = await httpsOver(directConnect(ip, host, port), host, port, req.method, reqPath, headers, bodyBuf, DIRECT_TIMEOUT);
+        const upRes = await httpsOver(directConnect(ip, host, port), host, port, req.method, reqPath, headers, bodyBuf, CONF.directTimeoutMs);
         log('DIRECT', host + reqPath.slice(0, 60), upRes.statusCode, Date.now() - t0 + 'ms');
         // 403/451 = 直连 IP 出口触发了目标站地区/风控拦截, 该响应不可信, 必须换兜底节点出口重试
         if (upRes.statusCode === 403 || upRes.statusCode === 451) {
@@ -533,11 +521,11 @@ const server = https.createServer(TLS_OPTS, async (req, res) => {
   let clientGone = false;
   res.on('close', () => { clientGone = true; });
   // 全请求预算: 直连耗掉太多时兜底只试一次, 且每次兜底超时不超过剩余预算, 保证在 DevSidecar 40s 之前返回
-  const maxAttempts = (REQ_BUDGET_MS - (Date.now() - t0)) < (FALLBACK_TIMEOUT + 5000) ? 1 : 2;
+  const maxAttempts = (CONF.requestBudgetMs - (Date.now() - t0)) < (CONF.fallbackTimeoutMs + 5000) ? 1 : 2;
   for (let attempt = 1; attempt <= maxAttempts && !clientGone; attempt++) {
     try {
       const sock = await tunnelConnect(host, port);
-      const fbTimeout = Math.max(6000, Math.min(FALLBACK_TIMEOUT, REQ_BUDGET_MS - (Date.now() - t0) - 3000));
+      const fbTimeout = Math.max(6000, Math.min(CONF.fallbackTimeoutMs, CONF.requestBudgetMs - (Date.now() - t0) - 3000));
       const upRes = await httpsOver(socketConnect(sock), host, port, req.method, reqPath, headers, bodyBuf, fbTimeout);
       log('FALLBACK', host + reqPath.slice(0, 60), upRes.statusCode, 'direct=' + (directErr ? directErr.message : 'n/a'), 'attempt=' + attempt, Date.now() - t0 + 'ms');
       return relayResponse(upRes, res);
@@ -552,7 +540,7 @@ const server = https.createServer(TLS_OPTS, async (req, res) => {
 server.on('upgrade', async (req, clientSock, head) => {
   log('UPGRADE', req.url.split('?')[0].slice(0, 80));
   const m = /^\/([^/]+)\/([^/:]+)(?::([0-9]+))?(\/.*)?$/.exec(req.url);
-  if (!m || m[1] !== CONF.secret || req.headers.dspassword !== CONF.password) return clientSock.destroy();
+  if (!m || m[1] !== CONF.secret || !timingSafeEq(req.headers.dspassword, CONF.password)) return clientSock.destroy();
   const host = m[2];
   const port = m[3] ? Number(m[3]) : 443;
   const reqPath = m[4] || '/';
@@ -570,7 +558,7 @@ server.on('upgrade', async (req, clientSock, head) => {
   const openDirect = () =>
     new Promise((resolve, reject) => {
       dohResolve(host).then((ips) => {
-        const s = tls.connect({ host: ips[0] || host, port, servername: host, timeout: DIRECT_TIMEOUT }, () => resolve(s));
+        const s = tls.connect({ host: ips[0] || host, port, servername: host, timeout: CONF.directTimeoutMs }, () => resolve(s));
         s.once('error', reject);
         s.once('timeout', () => s.destroy(new Error('direct timeout')));
       });
@@ -596,4 +584,7 @@ server.on('clientError', (err, socket) => {
   if (socket.writable && !socket.destroyed) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
 });
 
-server.listen(CONF.port || 8470, '127.0.0.1', () => log('listening (https)', '127.0.0.1:' + (CONF.port || 8470), 'upstream=' + UP.href, 'directTimeoutMs=' + DIRECT_TIMEOUT));
+fs.writeFileSync(PID_PATH, process.pid + String.fromCharCode(10));
+process.on('SIGTERM', () => { try { fs.unlinkSync(PID_PATH); } catch (e) {} process.exit(0); });
+process.on('exit', () => { try { fs.unlinkSync(PID_PATH); } catch (e) {} });
+server.listen(CONF.port || 8470, '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + (CONF.port || 8470), 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'pid=' + process.pid));

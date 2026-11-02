@@ -5,6 +5,7 @@ on:
   workflow_dispatch: {}
 permissions:
   contents: write
+  issues: write
 jobs:
   sync:
     runs-on: ubuntu-latest
@@ -13,14 +14,40 @@ jobs:
         with:
           ref: master
           fetch-depth: 0
+          submodules: true
       - uses: aormsby/Fork-Sync-With-Upstream-action@v3.4
         with:
           upstream_sync_repo: docmirror/dev-sidecar
           upstream_sync_branch: master
           target_sync_branch: master
           git_push_args: --force-with-lease
+      # 同步官方后, 把 vendor/ds-core 子模块自动 bump 到官方内核仓库最新 main
+      - name: Bump ds-core submodule
+        id: bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote add upstream-core https://github.com/Blue-Frontier/ds-core.git || true
+          git fetch upstream-core main
+          UP_SHA=$(git rev-parse upstream-core/main)
+          CUR_SHA=$(git -C vendor/ds-core rev-parse HEAD || echo none)
+          echo "up=$UP_SHA cur=$CUR_SHA"
+          if [ "$UP_SHA" != "$CUR_SHA" ]; then
+            git -C vendor/ds-core fetch origin "$UP_SHA" && git -C vendor/ds-core checkout --detach "$UP_SHA"
+            git add vendor/ds-core
+            if git diff --cached --quiet; then
+              echo "bumped=false" >> "$GITHUB_OUTPUT"
+            else
+              git commit -m "chore(submodule): ds-core bump to $UP_SHA"
+              git push origin master
+              echo "bumped=true" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "bumped=false" >> "$GITHUB_OUTPUT"
+          fi
       # 同步官方后, 把 master 自动合并进功能开发分支(快进或保留合并提交)
       - name: Merge master into feature branch
+        id: merge
         if: success()
         run: |
           git config user.name "github-actions[bot]"
@@ -28,8 +55,26 @@ jobs:
           git fetch origin adapter || true
           git checkout adapter || git checkout -b adapter origin/master
           git merge master --no-edit || {
-            echo '::error::功能分支合并冲突, 需要手动处理'
+            echo "MERGE_CONFLICT=1" >> "$GITHUB_ENV"
             exit 1
           }
           git push origin adapter
+      # 合并冲突时自动开 Issue 提醒, 不静默失败
+      - name: Open issue on merge conflict
+        if: env.MERGE_CONFLICT == '1'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = 'adapter 分支自动同步冲突, 需要手动处理';
+            const body = '每日自动同步在合并 master 到 adapter 时发生冲突。\n\n请本地执行: git fetch origin && git checkout adapter && git merge origin/master, 解决冲突后推送。\n\n工作流运行: ' + process.env.GITHUB_SERVER_URL + '/' + process.env.GITHUB_REPOSITORY + '/actions/runs/' + process.env.GITHUB_RUN_ID;
+            const existing = await github.rest.issues.listForRepo({
+              owner: context.repo.owner, repo: context.repo.repo,
+              state: 'open', labels: 'sync-conflict'
+            });
+            if (existing.data.length === 0) {
+              await github.rest.issues.create({
+                owner: context.repo.owner, repo: context.repo.repo,
+                title, body, labels: ['sync-conflict']
+              });
+            }
 

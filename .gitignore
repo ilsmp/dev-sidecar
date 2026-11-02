@@ -23,3 +23,10 @@ gen
 .claude
 .workbuddy-ai/
 atlas.facets.json
+# adapter runtime files (conf.json 含密钥，由管理器自动生成；日志与 pid 为运行时产物)
+packages/gui/extra/adapter/conf.json
+packages/gui/extra/adapter/adapter.log
+packages/gui/extra/adapter/adapter.out.log
+packages/gui/extra/adapter/adapter.err.log
+packages/gui/extra/adapter/adapter.pid
+

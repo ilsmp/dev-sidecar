@@ -206,27 +206,9 @@ export default defineComponent({
           </div>
         </a-form-item>
 
-        <a-form-item label="探测地址">
-          <a-input v-model:value="conf.probeUrl" placeholder="https://www.cloudflare.com/" allow-clear />
-          <div class="form-help">
-            用于检测直连/代理连通性的探测地址，一般保持默认。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="VPN 软件名">
-          <a-input v-model:value="conf.vpnApp" placeholder="可选：VPN 软件进程名，用于守护重启" allow-clear />
-          <div class="form-help">
-            填写后适配器会在 VPN 进程意外退出时尝试重新拉起（需与进程名匹配）。留空则不启用守护。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="VPN 自动守护">
-          <a-switch v-model:checked="conf.vpnAutoRestart" />
-          <div class="form-help">
-            开启后按上面的 VPN 软件名做进程守护。
-          </div>
-        </a-form-item>
-
+        
+        
+        
         <a-form-item :wrapper-col="{ offset: 5 }">
           <a-space wrap>
             <a-button type="primary" :loading="loading" @click="save()">
