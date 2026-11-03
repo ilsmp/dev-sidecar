@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * DevSidecar 二层代理适配器：DoH 直连优先 + 兜底上游(可配置/热更新) + 重试 + 系统代理看门狗
+ * DevSidecar 二层代理适配器：DoH 直连优先 + 兜底上游(可配置/热更新) + 重试
  * 协议: http://127.0.0.1:{port}/{secret}/{真实域名}[:port]{原始path} + header dspassword
  */
 'use strict';
@@ -26,7 +26,6 @@ function applyConf(next) {
   CONF.directTimeoutMs = Number(next.directTimeoutMs) || 1000;
   CONF.fallbackTimeoutMs = Number(next.fallbackTimeoutMs) || 25000;
   CONF.requestBudgetMs = Number(next.requestBudgetMs) || 30000;
-  CONF.watchdogIntervalMs = Math.max(1000, Number(next.watchdogIntervalMs) || 3000);
   const arr = Array.isArray(next.directSkipHosts) ? next.directSkipHosts : [];
   CONF.directSkipHosts = arr.map((s) => String(s).toLowerCase()).filter(Boolean);
   UP = new URL(CONF.upstream);
@@ -69,6 +68,30 @@ process.on('unhandledRejection', (e) => log('unhandledRejection', e));
 // ---------- conf.json 热更新（改上游端口/超时/密钥后约3秒生效） ----------
 let confMtime = 0;
 try { confMtime = fs.statSync(CONF_PATH).mtimeMs; } catch (e) {}
+
+// 端口热切换: 必须等 close 回调完成再 listen, 否则旧 keep-alive 连接未断时新 listen 会
+// EADDRINUSE/监听过期端口; pendingPort 保证关闭等待期间端口再次变更时始终用最新值
+let portClosing = false;
+let pendingPort = null;
+function listenOn(port) {
+  server.listen(port, '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + port));
+}
+function restartListen(newPort) {
+  pendingPort = newPort;
+  if (portClosing) return;
+  if (server.listening) {
+    portClosing = true;
+    if (typeof server.closeAllConnections === 'function') { try { server.closeAllConnections(); } catch (e) {} }
+    server.close(() => {
+      portClosing = false;
+      const target = pendingPort; pendingPort = null;
+      if (target !== null) listenOn(target);
+    });
+  } else {
+    const target = pendingPort; pendingPort = null;
+    listenOn(target);
+  }
+}
 setInterval(() => {
   try {
     const st = fs.statSync(CONF_PATH);
@@ -79,10 +102,8 @@ setInterval(() => {
     applyConf(next);
     modeCache = null;
     log('CONFIG-RELOADED', 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'port=' + CONF.port, 'directSkipHosts=' + directSkipHosts.size);
-    if (oldPort !== Number(CONF.port || 8470)) {
-      server.close(() => {});
-      server.listen(Number(CONF.port || 8470), '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + (CONF.port || 8470)));
-    }
+    const newPort = Number(CONF.port || 8470);
+    if (oldPort !== newPort) restartListen(newPort);
   } catch (e) { log('config reload error', e); }
 }, 3000);
 
@@ -98,6 +119,7 @@ setInterval(() => {
   for (const [k, v] of cleanDnsCache) { if (now - v.ts > 600000) cleanDnsCache.delete(k); }
   for (const [k, v] of blockedIps) { if (now - v.ts > 600000) blockedIps.delete(k); }
   for (const [k, v] of directSkip) { if (now > v) directSkip.delete(k); }
+  for (const [k, v] of directFails) { if (now - v.ts > 600000) directFails.delete(k); }
 }, 600000);
 
 // ---------- DoH 解析(阿里公共 DNS, IP 直连避免系统 DNS 污染) ----------
@@ -297,7 +319,6 @@ async function socksConnect(connectHost, targetPort) {
       }
     };
     let phase = 'greeting';
-    let buf = Buffer.alloc(0);
     sock.once('connect', () => {
       sock.setKeepAlive(true, 30000);
       // RFC1928: greeting, 无认证
@@ -505,10 +526,12 @@ const server = http.createServer(async (req, res) => {
       }
     }
     if (directErr) {
-      directFails.set(host, (directFails.get(host) || 0) + 1);
-      if (directFails.get(host) >= 3) {
+      const cur = directFails.get(host) || { n: 0, ts: 0 };
+      cur.n += 1; cur.ts = Date.now();
+      directFails.set(host, cur);
+      if (cur.n >= 3) {
         directSkip.set(host, Date.now() + 600000);
-        directFails.set(host, 0);
+        directFails.delete(host);
         log('DIRECT-SKIP', host, '连续直连失败 -> 10分钟内直接走兜底');
       }
     }
@@ -587,4 +610,6 @@ server.on('clientError', (err, socket) => {
 fs.writeFileSync(PID_PATH, process.pid + String.fromCharCode(10));
 process.on('SIGTERM', () => { try { fs.unlinkSync(PID_PATH); } catch (e) {} process.exit(0); });
 process.on('exit', () => { try { fs.unlinkSync(PID_PATH); } catch (e) {} });
+// listen 失败(EADDRINUSE 等)只记日志不崩进程: 管理器 healthz 探测不到会拉起新实例自愈
+server.on('error', (e) => log('listen error', (e && e.code) || (e && e.message) || e));
 server.listen(CONF.port || 8470, '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + (CONF.port || 8470), 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'pid=' + process.pid));

@@ -248,6 +248,15 @@ const adapterApi = {
     if (exiting) {
       return { ok: false, msg: '应用正在退出' }
     }
+    // GUI 重启后 child 引用丢失: 端口上有健康实例即视为已运行(幂等收养)
+    {
+      const conf0 = this.confGet()
+      if (!isAlive() && (await healthz(conf0.port, conf0.secret))) {
+        const pid = readPid(P)
+        log.info(`[adapter] 发现健康的外部适配器实例, 幂等收养, pid=${pid || 'unknown'}`)
+        return { ok: true, adopted: true, pid }
+      }
+    }
     if (isAlive()) {
       const conf = this.confGet()
       if (await healthz(conf.port, conf.secret)) {
@@ -317,7 +326,7 @@ const adapterApi = {
     }
   },
 
-  /** 应用退出时停掉子进程(不动外部收养实例) */
+  /** 应用退出时停掉自己拉起的子进程(没有 child 时绝不误杀 pidfile 进程) */
   shutdown () {
     exiting = true
     if (isAlive()) {
