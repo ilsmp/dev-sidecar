@@ -1,77 +1,85 @@
 #!/usr/bin/env bash
-# 适配器引擎冒烟测试: 启动临时实例(端口 18471), 验证健康检查/直连/兜底/热更新/安全拦截
-# 用法: bash scripts/adapter-smoke.sh   (仓库根目录执行, 需 node 在 PATH)
+# 适配器引擎冒烟测试: 环境变量隔离 conf/pid/log 到临时目录, 完全不触碰仓库内真实配置
+# 用法: bash scripts/adapter-smoke.sh   (仓库根目录执行, 需 node + curl 在 PATH)
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ADAPTER_DIR="packages/gui/extra/adapter"
 PORT=${ADAPTER_SMOKE_PORT:-18471}
+PORT2=$((PORT + 1))
 WORK="$(mktemp -d)"
-trap 'kill "$SERVER_PID" 2>/dev/null || true; rm -rf "$WORK"' EXIT
+SERVER_PID=""
+cleanup() {
+  if [ -n "$SERVER_PID" ] && kill -0 "$SERVER_PID" 2>/dev/null; then kill "$SERVER_PID" 2>/dev/null || true; fi
+  rm -rf "$WORK"
+}
+trap cleanup EXIT
 
-# 独立 conf, 不触碰真实 conf.json
 SECRET=smoke000000
 PASSWORD=smokepassword000000
-cat > "$ADAPTER_DIR/conf.json" <<EOF
+CONF_WORK="$WORK/conf.json"
+LOG_WORK="$WORK/adapter.log"
+PID_WORK="$WORK/adapter.pid"
+
+write_conf() { # $1 = port
+  cat > "$CONF_WORK" <<ZEOF
 {
-  "port": $PORT,
+  "port": $1,
   "secret": "$SECRET",
   "password": "$PASSWORD",
   "upstream": "http://127.0.0.1:7890",
   "directTimeoutMs": 1000
 }
-EOF
+ZEOF
+}
 
-node "$ADAPTER_DIR/server.cjs" &
+fail=0
+check() {
+  if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1 (expect $2 got $3)"; fail=1; fi
+}
+
+# ---- start on PORT ----
+write_conf "$PORT"
+ADAPTER_CONF="$CONF_WORK" ADAPTER_PID="$PID_WORK" ADAPTER_LOG="$LOG_WORK" node "$ADAPTER_DIR/server.cjs" &
 SERVER_PID=$!
 for i in $(seq 1 50); do
   if curl -sf "http://127.0.0.1:$PORT/healthz?secret=$SECRET" >/dev/null 2>&1; then break; fi
   sleep 0.2
 done
 
-fail=0
-check() { # name expected result
-  if [ "$2" = "$3" ]; then echo "PASS $1"; else echo "FAIL $1 (expect $2 got $3)"; fail=1; fi
-}
-
-# 1. 健康检查: 正确 secret 200, 错误 secret 403
 check healthz-ok 200 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz?secret=$SECRET")"
 check healthz-bad 403 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz?secret=wrong")"
 
-# 2. 协议路径请求: /{secret}/{host}[:port]{path} + dspassword 头
-
 check path-noauth 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/$SECRET/example.com/")"
-
 code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H "dspassword: $PASSWORD" "http://127.0.0.1:$PORT/$SECRET/example.com/" || true)
-
 check path-auth 200 "$code"
-
 check path-badpw 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'dspassword: wrong' "http://127.0.0.1:$PORT/$SECRET/example.com/" || true)"
-
-# 3. loopback 目标必须被拒绝(防回环放大)
 
 check loopback-block 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "dspassword: $PASSWORD" "http://127.0.0.1:$PORT/$SECRET/127.0.0.1:1/" || true)"
 
-# 4. 热更新: directSkipHosts 写入后 3 秒内生效(日志出现 DIRECT-SKIP-CONFIG)
-cat > "$ADAPTER_DIR/conf.json" <<EOF
-{
-  "port": $PORT,
-  "secret": "$SECRET",
-  "password": "$PASSWORD",
-  "upstream": "http://127.0.0.1:7890",
-  "directTimeoutMs": 1000,
-  "directSkipHosts": ["smoke-test-invalid.example"]
-}
-EOF
+# ---- hot reload directSkipHosts ----
+write_conf "$PORT"
+python3 -c "import io, json, sys; p = sys.argv[1]; c = json.load(io.open(p)); c['directSkipHosts'] = ['smoke-test-invalid.example']; io.open(p, 'w').write(json.dumps(c, indent=2))" "$CONF_WORK"
 sleep 4
-# 主动发一个命中 directSkipHosts 的请求, 使热更新产生可见日志
 curl -s -o /dev/null --max-time 20 -H "dspassword: $PASSWORD" "http://127.0.0.1:$PORT/$SECRET/smoke-test-invalid.example/" || true
 sleep 1
-if grep -q "DIRECT-SKIP-CONFIG" "$ADAPTER_DIR/adapter.log" 2>/dev/null; then
+if grep -q "DIRECT-SKIP-CONFIG" "$LOG_WORK" 2>/dev/null; then
   echo "PASS hot-reload"
 else
   echo "FAIL hot-reload (no DIRECT-SKIP-CONFIG in log)"; fail=1
 fi
 
-if [ "$fail" = 0 ]; then echo "ALL PASS"; else exit 1; fi
+# ---- port hot switch PORT -> PORT2 ----
+write_conf "$PORT2"
+sleep 5
+check port-hot-switch-old-down 000 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 2 "http://127.0.0.1:$PORT/healthz?secret=$SECRET" 2>/dev/null || true)"
+check port-hot-switch-new-up 200 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$PORT2/healthz?secret=$SECRET")"
 
+# ---- repo conf.json untouched ----
+if git diff --quiet -- "$ADAPTER_DIR/conf.json"; then
+  echo "PASS conf-isolated"
+else
+  echo "FAIL conf-isolated (repo conf.json was modified)"; fail=1
+fi
+
+if [ "$fail" = 0 ]; then echo "ALL PASS"; else exit 1; fi

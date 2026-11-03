@@ -73,7 +73,7 @@ export default defineComponent({
         this.conf.directSkipHosts = hosts
         this.conf = await this.$api.adapter.confSave(this.conf)
         this.directSkipHostsText = (this.conf.directSkipHosts || []).join('\n')
-        this.$message.success('配置已保存。修改端口或 upstream 后需重启适配器生效')
+        this.$message.success('配置已保存，自动热生效（改端口时加速服务会自动热重启同步）')
       } catch (e) {
         this.$message.error(`保存失败：${e.message || e}`)
       } finally {
@@ -163,7 +163,7 @@ export default defineComponent({
         show-icon
         style="margin-bottom: 16px"
         message="直连优先 → 失败自动兜底"
-        description="所有被代理的请求先尝试国内直连（DoH 解析，超时可配）；直连失败或返回 403/451 时自动转发到下面的 upstream 代理。命中「直连跳过域名」的请求不试直连，直接走 upstream。换 VPN 只需改 upstream 地址。"
+        description="所有被代理的请求先尝试国内直连（DoH 解析，超时可配）；直连失败或返回 403/451 时自动转发到下面的 upstream 代理。命中「直连跳过域名」的请求不试直连，直接走 upstream。所有配置保存后自动热生效，无需重启；换 VPN 只需改 upstream 地址。"
       />
 
       <a-form :label-col="{ span: 5 }" :wrapper-col="{ span: 19 }">
@@ -177,7 +177,7 @@ export default defineComponent({
         <a-form-item label="监听端口">
           <a-input-number v-model:value="conf.port" :min="1024" :max="65535" style="width: 180px" />
           <div class="form-help">
-            适配器在本机监听的端口，默认 8470。修改后需重启适配器。
+            适配器在本机监听的端口，默认 8470。修改保存后自动生效（加速服务运行中会自动热重启同步，约数秒中断）。
           </div>
         </a-form-item>
 
@@ -185,6 +185,31 @@ export default defineComponent({
           <a-input v-model:value="conf.upstream" placeholder="http://127.0.0.1:7890" allow-clear />
           <div class="form-help">
             直连失败时转发到的代理地址。默认是本机 7890 端口的代理软件；以后换其他 VPN 软件，只改这个地址即可。
+          </div>
+        </a-form-item>
+
+        <a-form-item label="上游协议">
+          <a-radio-group v-model:value="conf.upstreamType">
+            <a-radio-button value="auto">auto 自动探测</a-radio-button>
+            <a-radio-button value="http">http 代理</a-radio-button>
+            <a-radio-button value="socks">socks5 代理</a-radio-button>
+          </a-radio-group>
+          <div class="form-help">
+            默认 auto：引擎会先后尝诅 http CONNECT 和 socks5 两种方式连接 upstream，探测成功后记住结果。上游软件只支持其中一种协议时可手动指定，避免每次失败都重试另一种。
+          </div>
+        </a-form-item>
+
+        <a-form-item label="兜底代理超时（毫秒）">
+          <a-input-number v-model:value="conf.fallbackTimeoutMs" :min="5000" :max="60000" :step="1000" style="width: 180px" />
+          <div class="form-help">
+            通过 upstream 建立连接+发送请求的最长等待时间，默认 25000 毫秒。上游节点慢时可适当调大。
+          </div>
+        </a-form-item>
+
+        <a-form-item label="请求总预算（毫秒）">
+          <a-input-number v-model:value="conf.requestBudgetMs" :min="10000" :max="120000" :step="1000" style="width: 180px" />
+          <div class="form-help">
+            单个请求的总时间预算（直连+兜底合计），默认 30000 毫秒，需保持小于 DevSidecar 的 40 秒上限，避免上层先超时。
           </div>
         </a-form-item>
 
@@ -206,9 +231,23 @@ export default defineComponent({
           </div>
         </a-form-item>
 
-        
-        
-        
+        <a-form-item label="鉴权凭据">
+          <a-space direction="vertical" :size="4" style="width: 100%">
+            <a-input :value="conf.secret" readonly>
+              <template #addonBefore>secret</template>
+            </a-input>
+            <a-input :value="conf.password" readonly>
+              <template #addonBefore>password</template>
+              <template #addonAfter>
+                <span class="form-help-inline">自动生成，供 DevSidecar 接入时使用</span>
+              </template>
+            </a-input>
+          </a-space>
+          <div class="form-help">
+            安装/重启时自动生成，泄露后可删除 conf.json 中这两个字段并重启适配器，会自动重新生成。
+          </div>
+        </a-form-item>
+
         <a-form-item :wrapper-col="{ offset: 5 }">
           <a-space wrap>
             <a-button type="primary" :loading="loading" @click="save()">
@@ -252,5 +291,9 @@ export default defineComponent({
   font-size: 12px;
   line-height: 1.6;
   margin-top: 4px;
+}
+.form-help-inline {
+  color: #999;
+  font-size: 12px;
 }
 </style>

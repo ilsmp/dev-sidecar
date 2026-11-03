@@ -6,13 +6,27 @@
  */
 import fs from 'node:fs'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 import net from 'node:net'
 import crypto from 'node:crypto'
 import http from 'node:http'
 import { spawn } from 'node:child_process'
-import { fileURLToPath } from 'node:url'
 import log from '../../utils/util.log.gui.js'
 import lodash from 'lodash'
+
+/** mitmproxy 路径解析(与 backend.js 同源): bridge/api/../mitmproxy.js */
+let _mitmproxyPath = null
+function resolveMitmproxyPath () {
+  if (_mitmproxyPath !== null) {
+    return _mitmproxyPath
+  }
+  try {
+    _mitmproxyPath = path.join(path.dirname(fileURLToPath(import.meta.url)), '../mitmproxy.js')
+  } catch {
+    _mitmproxyPath = ''
+  }
+  return _mitmproxyPath
+}
 
 // 路径惰性解析: ESM import 提升会先于 backend.js 的模块体执行,
 // 而 DS_EXTRA_PATH 是 backend.js 在打包后设置的资源目录(resources/extra),
@@ -37,8 +51,12 @@ const DEFAULT_CONF = {
   secret: '',
   password: '',
   upstream: 'http://127.0.0.1:7890',
+  upstreamType: 'auto',
   directTimeoutMs: 1000,
+  fallbackTimeoutMs: 25000,
+  requestBudgetMs: 30000,
 }
+const UPSTREAM_TYPES = ['auto', 'http', 'socks']
 
 // ---------- conf ----------
 function loadConf (P) {
@@ -65,8 +83,19 @@ function sanitizeConf (merged) {
   const conf = Object.assign({}, DEFAULT_CONF, merged || {})
   conf.port = Number.parseInt(conf.port, 10) || DEFAULT_CONF.port
   conf.directTimeoutMs = Number.parseInt(conf.directTimeoutMs, 10) || DEFAULT_CONF.directTimeoutMs
+  conf.fallbackTimeoutMs = Number.parseInt(conf.fallbackTimeoutMs, 10) || DEFAULT_CONF.fallbackTimeoutMs
+  conf.requestBudgetMs = Number.parseInt(conf.requestBudgetMs, 10) || DEFAULT_CONF.requestBudgetMs
+  conf.upstreamType = UPSTREAM_TYPES.includes(conf.upstreamType) ? conf.upstreamType : 'auto'
   if (conf.port < 1024 || conf.port > 65535) {
     throw new Error('端口必须在 1024-65535 之间')
+  }
+  try {
+    const u = new URL(conf.upstream)
+    if (!['http:', 'https:', 'socks5:', 'socks4:'].includes(u.protocol)) {
+      throw new Error('unsupported protocol')
+    }
+  } catch {
+    throw new Error('upstream 必须是合法代理地址, 如 http://127.0.0.1:7890')
   }
   if (!Array.isArray(conf.directSkipHosts)) {
     conf.directSkipHosts = []
@@ -214,12 +243,37 @@ const adapterApi = {
     return conf
   },
 
-  /** 合并保存, 校验端口/超时/域名列表 */
-  confSave (patch) {
+  /**
+   * 合并保存, 校验端口/超时/域名列表
+   * 全部字段热生效: 引擎 3 秒内自动重读 conf.json;
+   * 仅当 port/secret/password 变化时(影响内核 overwall 注册快照), 额外做两件事:
+   *   1. 自动把新值重新注册到 overwall.server(不需要再手动点接入)
+   *   2. 内核代理正在运行时自动热重启(最多几秒中断), 让快照立即吸收新值
+   * upstream/超时/域名列表的变化不需要重启任何东西。
+   */
+  async confSave (patch) {
     const cur = this.confGet()
     const P = resolvePaths()
     const conf = sanitizeConf(Object.assign({}, cur, patch || {}))
+    const identityChanged = conf.port !== cur.port || conf.secret !== cur.secret || conf.password !== cur.password
     writeConf(P, conf)
+    if (!identityChanged) {
+      return conf
+    }
+    try {
+      await this.integrateOverwall()
+    } catch (e) {
+      log.warn('[adapter] overwall 重新注册失败, 请手动点接入按钮:', e)
+    }
+    try {
+      const { default: DevSidecar } = await import('@blue-frontier/dev-sidecar')
+      if (DevSidecar.api.status.get().server?.enabled) {
+        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath() })
+        log.info('[adapter] 内核代理已热重启以同步 overwall 注册新值')
+      }
+    } catch (e) {
+      log.warn('[adapter] 内核代理热重启失败(下次手动重启代理服务后生效):', e)
+    }
     return conf
   },
 
@@ -366,6 +420,14 @@ const adapterApi = {
     }
     await DevSidecar.api.config.save(cfg)
     log.info(`[adapter] overwall 自定义服务器已注册: ${key}:${conf.port}/${conf.secret}`)
+    try {
+      if (DevSidecar.api.status.get().server?.enabled) {
+        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath() })
+        log.info('[adapter] overwall registered, server hot-restarted')
+      }
+    } catch (e) {
+      log.warn('[adapter] overwall hot-restart failed (takes effect after manual server restart):', e)
+    }
     return { ok: true, server: ow.server[key] }
   },
 }

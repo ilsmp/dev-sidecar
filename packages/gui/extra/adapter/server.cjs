@@ -12,9 +12,10 @@ const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
 
-const CONF_PATH = path.join(__dirname, 'conf.json');
-const PID_PATH = path.join(__dirname, 'adapter.pid');
-const LOG_PATH = path.join(__dirname, 'adapter.log');
+// 路径可用环境变量覆盖(多实例/冒烟测试全隔离, 不触碰真实配置)
+const CONF_PATH = process.env.ADAPTER_CONF || path.join(__dirname, 'conf.json');
+const PID_PATH = process.env.ADAPTER_PID || path.join(__dirname, 'adapter.pid');
+const LOG_PATH = process.env.ADAPTER_LOG || path.join(__dirname, 'adapter.log');
 const CONF = {};
 let UP = new URL('http://127.0.0.1:7890');
 function applyConf(next) {
