@@ -29,8 +29,10 @@ function applyConf(next) {
   CONF.requestBudgetMs = Number(next.requestBudgetMs) || 30000;
   const arr = Array.isArray(next.directSkipHosts) ? next.directSkipHosts : [];
   CONF.directSkipHosts = arr.map((s) => String(s).toLowerCase()).filter(Boolean);
+  CONF.preSetHosts = (next.preSetHosts && typeof next.preSetHosts === 'object' && !Array.isArray(next.preSetHosts)) ? next.preSetHosts : {};
   UP = new URL(CONF.upstream);
   directSkipHosts = new Set(CONF.directSkipHosts);
+  compilePreset();
 }
 
 const MAX_BODY = 64 * 1024 * 1024;
@@ -42,6 +44,44 @@ function hostSkipsDirect(h) {
   if (directSkipHosts.has(h)) return true;
   for (const s of directSkipHosts) { if (s.startsWith('.') && (h.endsWith(s) || h === s.slice(1))) return true; }
   return false;
+}
+
+// ---------- 预设IP直连: conf.preSetHosts 由管理器从用户 config.json server.preSetIpList 同步 ----------
+// 键支持两种形态: 正则(含 ()[]{}?+|^$ 等元字符) 或 段级通配(*.youtube.com / miyun.io 字面)
+// 值形如 { '8.137.102.117': true, '142.251.189.206': false }, 仅取值为 true 的 IP
+let PRESET_RULES = [];
+const REGEX_META = /[()\[\]{}?+|^$\\]/;
+function compilePreset() {
+  PRESET_RULES = [];
+  const map = CONF.preSetHosts;
+  if (!map) return;
+  for (const [pattern, ipMap] of Object.entries(map)) {
+    if (!ipMap || typeof ipMap !== 'object') continue;
+    const ips = Object.entries(ipMap)
+      .filter(([ip, on]) => on && /^[0-9.]+$/.test(ip))
+      .map(([ip]) => ip);
+    if (!ips.length) continue;
+    let re = null;
+    try {
+      if (REGEX_META.test(pattern)) {
+        re = new RegExp(pattern, 'i');
+      } else {
+        // 段级通配: * 匹配单段(不跨点), 无 * 时等值匹配
+        const esc = pattern.replace(/[.+]/g, '\\$&').replace(/\*/g, '[^.]*');
+        re = new RegExp('^' + esc + '$', 'i');
+      }
+    } catch (e) { continue; }
+    PRESET_RULES.push({ re, ips });
+  }
+  log('PRESET-LOADED', PRESET_RULES.length + ' rules');
+}
+function presetResolve(hostname) {
+  const h = String(hostname || '').toLowerCase();
+  if (!h || !PRESET_RULES.length) return null;
+  for (const r of PRESET_RULES) {
+    try { if (r.re.test(h)) return r.ips; } catch (e) {}
+  }
+  return null;
 }
 
 let logStream = null;
@@ -168,6 +208,16 @@ function dohResolve(hostname) {
     req.on('error', () => resolve([]));
     req.end();
   });
+}
+
+// 统一解析入口: 预设IP优先(命中且未被拉黑), 否则 DoH; 预设全拉黑时降级 DoH
+async function resolveHost(hostname) {
+  const pre = presetResolve(hostname);
+  if (pre && pre.length) {
+    const usable = pre.filter((ip) => !isBlocked(hostname, ip));
+    if (usable.length) return usable;
+  }
+  return dohResolve(hostname);
 }
 
 // ---------- 通过兜底上游 HTTP CONNECT 建立到目标的 TLS 隧道 ----------
@@ -504,7 +554,7 @@ const server = http.createServer(async (req, res) => {
     directErr = new Error('direct skipped (config directSkipHosts)');
     log('DIRECT-SKIP-CONFIG', host, '命中 directSkipHosts -> 直接走兜底');
   } else if (directAlive) {
-    const ips = await dohResolve(host);
+    const ips = await resolveHost(host);
     const candidates = ips.length ? ips.filter((ip) => !isBlocked(host, ip)).slice(0, 2) : [null];
     let directBlocked = false; // 直连返回了地区封锁类状态码(403/451), 需要兜底节点出口重试
     for (const ip of candidates) {
@@ -581,7 +631,7 @@ server.on('upgrade', async (req, clientSock, head) => {
     clientSock.on('close', () => wsReport('client-close'));    sock.on('error', () => clientSock.destroy());    clientSock.on('error', () => sock.destroy());    clientSock.on('close', () => log('WS-CLOSED', host, 'upstream=' + (firstLine || 'n/a'), (Date.now() - t0) + 'ms'));  };  const t0 = Date.now();
   const openDirect = () =>
     new Promise((resolve, reject) => {
-      dohResolve(host).then((ips) => {
+        resolveHost(host).then((ips) => {
         const s = tls.connect({ host: ips[0] || host, port, servername: host, timeout: CONF.directTimeoutMs }, () => resolve(s));
         s.once('error', reject);
         s.once('timeout', () => s.destroy(new Error('direct timeout')));

@@ -56,6 +56,7 @@ const DEFAULT_CONF = {
   directTimeoutMs: 1000,
   fallbackTimeoutMs: 25000,
   requestBudgetMs: 30000,
+  preSetHosts: {},
 }
 const UPSTREAM_TYPES = ['auto', 'http', 'socks']
 
@@ -105,10 +106,46 @@ function sanitizeConf (merged) {
   conf.directSkipHosts = conf.directSkipHosts
     .map(s => String(s).trim().toLowerCase())
     .filter(Boolean)
+  // 预设IP表(普通对象); 由 syncPresetFromUserConfig 从用户 config.json 同步
+  if (!conf.preSetHosts || typeof conf.preSetHosts !== 'object' || Array.isArray(conf.preSetHosts)) {
+    conf.preSetHosts = {}
+  }
   if (!conf.secret || !conf.password) {
     Object.assign(conf, generateSecrets())
   }
   return conf
+}
+
+/** 从用户 config.json 的 server.preSetIpList 同步预设IP到适配器 conf(值 true 的 IP 才会被适配器采用) */
+function syncPresetFromUserConfig (P, conf) {
+  try {
+    const userCfgPath = process.env.DEV_SIDECAR_USER_CONFIG
+      || path.join(process.env.HOME || '', '.dev-sidecar', 'config.json')
+    if (!fs.existsSync(userCfgPath)) return false
+    let user = null
+    try {
+      user = JSON.parse(fs.readFileSync(userCfgPath, 'utf8'))
+    } catch {
+      return false
+    }
+    const list = lodash.get(user, 'server.preSetIpList')
+    if (!list || typeof list !== 'object' || Array.isArray(list)) return false
+    const picked = {}
+    for (const [pattern, ipMap] of Object.entries(list)) {
+      if (!ipMap || typeof ipMap !== 'object') continue
+      const ips = {}
+      for (const [ip, on] of Object.entries(ipMap)) {
+        if (on && /^[0-9.]+$/.test(ip)) ips[ip] = true
+      }
+      if (Object.keys(ips).length) picked[pattern] = ips
+    }
+    if (!Object.keys(picked).length) return false
+    conf.preSetHosts = picked
+    return true
+  } catch (e) {
+    log.warn('[adapter] 同步预设IP失败(不影响启动):', e && e.message)
+    return false
+  }
 }
 
 // ---------- 健康检查 ----------
@@ -189,6 +226,7 @@ function spawnServer (P) {
   const err = fs.openSync(P.errLog, 'a')
   child = spawn(process.execPath, [P.serverJs], {
     cwd: P.dir,
+    env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['ignore', out, err],
     detached: false,
   })
@@ -342,6 +380,10 @@ const adapterApi = {
     const conf = this.confGet()
     if (!fs.existsSync(P.serverJs)) {
       throw new Error(`适配器 server.cjs 不存在: ${P.serverJs}`)
+    }
+    // 启动前把用户 config.json 的预设IP同步进适配器 conf(用户编辑 config.json 后重启适配器即可生效)
+    if (syncPresetFromUserConfig(P, conf)) {
+      writeConf(P, conf)
     }
     // 外部已有进程占着端口: 健康检查通过则收养(孤儿进程), 否则明确报错
     if (await portOpen(conf.port)) {
