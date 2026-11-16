@@ -47,6 +47,7 @@ function resolvePaths () {
 }
 
 const DEFAULT_CONF = {
+  enabled: true,
   port: 8470,
   secret: '',
   password: '',
@@ -81,6 +82,7 @@ function generateSecrets () {
 
 function sanitizeConf (merged) {
   const conf = Object.assign({}, DEFAULT_CONF, merged || {})
+  conf.enabled = conf.enabled !== false
   conf.port = Number.parseInt(conf.port, 10) || DEFAULT_CONF.port
   conf.directTimeoutMs = Number.parseInt(conf.directTimeoutMs, 10) || DEFAULT_CONF.directTimeoutMs
   conf.fallbackTimeoutMs = Number.parseInt(conf.fallbackTimeoutMs, 10) || DEFAULT_CONF.fallbackTimeoutMs
@@ -256,8 +258,27 @@ const adapterApi = {
     const P = resolvePaths()
     const conf = sanitizeConf(Object.assign({}, cur, patch || {}))
     const identityChanged = conf.port !== cur.port || conf.secret !== cur.secret || conf.password !== cur.password
+    const enabledChanged = conf.enabled !== cur.enabled
     writeConf(P, conf)
+    // 开关关闭: 移除 overwall 注册, 避免增强功能域名指向已停止的适配器
+    if (conf.enabled === false) {
+      this.stop()
+      try {
+        await this.unintegrateOverwall()
+      } catch (e) {
+        log.warn('[adapter] 移除 overwall 注册失败(可忽略):', e)
+      }
+      return conf
+    }
     if (!identityChanged) {
+      if (enabledChanged) {
+        // 开关重新打开: 重新注册 overwall（integrateOverwall 内部会热重启）
+        try {
+          await this.integrateOverwall()
+        } catch (e) {
+          log.warn('[adapter] overwall 重新注册失败, 请手动点接入按钮:', e)
+        }
+      }
       return conf
     }
     try {
@@ -429,6 +450,33 @@ const adapterApi = {
       log.warn('[adapter] overwall hot-restart failed (takes effect after manual server restart):', e)
     }
     return { ok: true, server: ow.server[key] }
+  },
+
+  /**
+   * 移除 overwall 自定义服务器注册（开关关闭时调用）。
+   * 只删本适配器的注册键（http://127.0.0.1 的 ID=1 条目），不动用户其他服务器配置。
+   */
+  async unintegrateOverwall () {
+    const { default: DevSidecar } = await import('@blue-frontier/dev-sidecar')
+    const cfg = DevSidecar.api.config.get()
+    const ow = lodash.get(cfg, 'plugin.overwall')
+    if (!ow || !ow.server) {
+      return { ok: true, removed: false }
+    }
+    const removed = delete ow.server['http://127.0.0.1']
+    if (!removed) {
+      return { ok: true, removed: false }
+    }
+    await DevSidecar.api.config.save(cfg)
+    log.info('[adapter] overwall 自定义服务器注册已移除')
+    try {
+      if (DevSidecar.api.status.get().server?.enabled) {
+        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath() })
+      }
+    } catch (e) {
+      log.warn('[adapter] 移除注册后热重启失败(下次手动重启生效):', e)
+    }
+    return { ok: true, removed: true }
   },
 }
 

@@ -679,7 +679,7 @@ async function beforeQuit () {
   log.info('before quit')
   // 兜底适配器: 停掉自己拉起的子进程, 避免关 GUI 后留孤儿进程
   try {
-    backend.adapter.shutdown()
+    backend.api && backend.api.adapter && backend.api.adapter.shutdown()
   } catch (e) {
     log.error('adapter shutdown error:', e)
   }

@@ -1,0 +1,187 @@
+{
+  plugin: {
+    node: {
+      enabled: true,
+    },
+    git: {
+      enabled: true,
+    },
+    overwall: {
+      targets: {
+        '^(?:[\\w-]+\\.)*(?:github[\\w-]*\\.(?:com|io|dev)|ghcr\\.io)$': false,
+        'github.com': false,
+        '*.github.com': false,
+        '*github*.com': false,
+        '*.githubusercontent.com': false,
+        '*.githubassets.com': false,
+        '*.github.io': false,
+        '*.chatgpt.com': true,
+        '*.openai.com': true,
+        'auth.openai.com': true,
+        'auth0.openai.com': true,
+        '*.oaistatic.com': true,
+        'claude.ai': true,
+        '*.claude.ai': true,
+        '*.anthropic.com': true,
+        'api.anthropic.com': true,
+        '*.googleapis.com': false,
+        '*.gstatic.com': false,
+        '*.google-analytics.com': false,
+        '*.googleusercontent.com': false,
+        'chatgpt.com': true,
+        'openai.com': true,
+      },
+      enabled: true,
+      pac: {
+        enabled: true,
+        autoUpdate: true,
+      },
+    },
+    pip: {},
+  },
+  proxy: {
+    excludeDomesticDomainAllowList: true,
+    proxyHttp: true,
+    setEnv: true,
+    excludeIpList: {
+      '*.miyun.io': false,
+      '*.sigs.k8s.io': false,
+      '*.elastic.co': true,
+      'objects-origin.githubusercontent.com': null,
+    },
+  },
+  app: {
+    autoStart: {
+      enabled: true,
+    },
+    autoChecked: false,
+    dock: {
+      hideWhenWinClose: true,
+    },
+    theme: 'system',
+    closeStrategy: 2,
+    showShutdownTip: false,
+    mode: 'ow',
+  },
+  server: {
+    dns: {
+      ech: {
+        domains: [
+          '*t.co',
+          '*twitter.com',
+          '*twimg.com',
+          '*sci-hub.pub',
+          '^(.+.)?x.com$',
+          '*matrix.org',
+          '*mod.io',
+          '*itch.io',
+          '*patreon.com',
+          '*substack.com',
+          '*medium.com',
+          '*v2ex.com',
+          'auth.docker.io',
+          'hub.docker.com',
+          '*pixiv.net',
+          '*civitai.com',
+          '*civitai.red',
+          '*ldstatic.com',
+          'civitai.com',
+          '*linux.do',
+          'greasyfork.org',
+        ],
+      },
+      mapping: {
+        '*.openai.com': 'cf-DoT',
+        'auth.openai.com': 'cf-DoT',
+        '*.oaiusercontent.com': 'cf-DoT',
+        '*.claude.ai': 'cf-DoT',
+        '*.anthropic.com': 'cf-DoT',
+        '*.google.com': 'cf-DoT',
+        '*.googleapis.com': 'cf-DoT',
+        '*.googleusercontent.com': 'cf-DoT',
+        '*.gstatic.com': 'cf-DoT',
+      },
+      familyMapping: {
+        '*.github.com': null,
+        '*github*.com': null,
+        '*duckduckgo.com': null,
+        '*.gstatic.com': null,
+        '*.googleapis.com': null,
+      },
+      speedTest: {
+        dnsProviders: [
+          'local',
+          'aliyun',
+          'safe360',
+          'cf-DoT',
+          'bebasid',
+          'cf-DoH',
+          'quad9-ip',
+          'cf-ip',
+          'rubyfish',
+        ],
+        hostnameList: [
+          'miyun.io',
+          'minikube.sigs.k8s.io',
+          'api.github.com',
+          'collector.github.com',
+          'githubusercontent.com',
+          'google.com.hk',
+          'google.com',
+          'github.com',
+        ],
+      },
+    },
+    intercepts: {
+      '*.claude.ai': null,
+    },
+    setting: {
+      tlsVersionMapping: {},
+    },
+    cloudflareRoute: {
+      mode: 'blacklist',
+      domains: {},
+      enabled: true,
+    },
+    preSetIpList: {
+      '^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$': {
+        '8.137.102.117': true,
+      },
+      'stitch.withgoogle.com': {
+        '8.137.102.117': true,
+      },
+      'miyun.io': {
+        '104.21.74.96': true,
+      },
+      '^(?!fonts).*(with)?google(apis|usercontent)?.com.*$': {
+        '8.137.102.117': true,
+        '142.251.189.206': false,
+      },
+      '^.*(youtube.com|gstatic.com|youtube.nocookie.com|youtu.be|ggpht.com|i.ytimg.com|blogger.com|doodles.google|about.google|android.com|antigravity.google)$': {
+        '8.137.102.117': true,
+        '142.251.189.206': false,
+      },
+      '*.youtube.com': {
+        '8.137.102.117': true,
+      },
+      '*.youtu.be': {
+        '8.137.102.117': true,
+      },
+      '*.youtube-nocookie.com': {
+        '8.137.102.117': true,
+      },
+      '*.ggpht.com': {
+        '8.137.102.117': true,
+      },
+      'i.ytimg.com': {
+        '8.137.102.117': true,
+      },
+      '*.gstatic.com': {
+        '8.137.102.117': true,
+      },
+    },
+    whiteList: {
+      '*.bigmodel.cn': true,
+    },
+  },
+}

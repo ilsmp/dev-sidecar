@@ -174,6 +174,17 @@ export default defineComponent({
           </a-space>
         </a-form-item>
 
+        <a-form-item label="自启动开关">
+          <a-switch
+            v-model:checked="conf.enabled"
+            checked-children="开"
+            un-checked-children="关"
+          />
+          <div class="form-help">
+            开启（默认）时应用启动会自动拉起适配器并接入增强功能(overwall)；关闭后需在本页手动启动。保存后立即生效。
+          </div>
+        </a-form-item>
+
         <a-form-item label="监听端口">
           <a-input-number v-model:value="conf.port" :min="1024" :max="65535" style="width: 180px" />
           <div class="form-help">

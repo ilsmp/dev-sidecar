@@ -394,20 +394,132 @@ function _getSettingsPath () {
   return path.join(dir, '/setting.json')
 }
 
+/**
+ * 按路径解析 API 目标，返回 { parent, fn } 以便 call 时保留 this 绑定。
+ * 此前 lodash.get 取出的函数脱离所属对象后直接调用，
+ * 导致 adapter.status/confSave 等内部 this.confGet() 全部报
+ * "Cannot read properties of undefined (reading 'confGet')"。
+ */
+function resolveInvokeTarget (apiPath) {
+  const segs = String(apiPath || '').split('.').filter(Boolean)
+  if (segs.length === 0) return null
+  const last = segs.pop()
+  for (const scope of [localApi, DevSidecar.api]) {
+    let cur = scope
+    let ok = true
+    for (const s of segs) {
+      if (cur == null || typeof cur !== 'object' || !(s in cur)) {
+        ok = false
+        break
+      }
+      cur = cur[s]
+    }
+    if (ok && cur != null && typeof cur[last] === 'function') {
+      return { parent: cur, fn: cur[last] }
+    }
+  }
+  return null
+}
+
 function invoke (api, param) {
-  let target = lodash.get(localApi, api)
-  if (target == null) {
-    target = lodash.get(DevSidecar.api, api)
+  const target = resolveInvokeTarget(api)
+  if (!target) {
+    log.error('找不到此接口方法：' + api)
+    throw new Error('api 接口不存在: ' + api)
   }
-  if (typeof target !== 'function') {
-    // 明确 reject：让调用方 await 的 IPC Promise 能拿到可定位的错误，
-    // 而不是在 main 进程同步抛 TypeError（undefined(param)）
-    log.error(`找不到此接口方法：${api}`)
-    throw new Error(`api 接口不存在: ${api}`)
+  // 关键修复：call 保留 this 绑定，adapter.status/confSave 内部的 this.confGet() 才能工作
+  return target.fn.call(target.parent, param)
+}
+
+/**
+ * 首次安装种入个人默认配置。
+ * 落点：用户层 config.json —— 合并顺序中最后合并、优先级最高，
+ * 共享远程/个人远程/内置默认都无法覆盖它。
+ * 模板随安装包分发（resources/extra/personal-defaults/config.personal.json5）。
+ * 写入标记文件后不再重复种入：升级/重装不会覆盖用户后续修改。
+ * 同时默认开启增强模式开关（setting.overwall=true），安装即生效无需二次配置。
+ */
+function ensurePersonalDefaults () {
+  try {
+    const userBase = configLoader.getUserBasePath()
+    const markerPath = path.join(userBase, '.personal-defaults-applied')
+    if (fs.existsSync(markerPath)) return
+    const defaultsDir = process.env.DS_EXTRA_PATH || path.join(__dirname, '../../../extra')
+    const defaultsSrc = path.join(defaultsDir, 'personal-defaults', 'config.personal.json5')
+    if (!fs.existsSync(defaultsSrc)) {
+      log.info('[personal-defaults] 模板不存在，跳过种入: ' + defaultsSrc)
+      return
+    }
+    const defaults = jsonApi.parse(fs.readFileSync(defaultsSrc, 'utf8')) || {}
+    fs.mkdirSync(userBase, { recursive: true })
+    const cfgPath = configLoader.getUserConfigPath()
+    let cur = {}
+    if (fs.existsSync(cfgPath)) {
+      try {
+        cur = jsonApi.parse(fs.readFileSync(cfgPath, 'utf8')) || {}
+      } catch {
+        cur = {}
+      }
+    }
+    // 深合并但用户优先:
+    //  - 用户已有标量(含 null 删除标记)整值保留, 用户没配的标量用模板
+    //  - 用户已有数组整组保留, 用户没配的数组用模板整组
+    //  - 双方都是普通对象时递归按键补缺
+    lodash.mergeWith(cur, defaults, (userVal, tmplVal) => {
+      if (userVal === undefined) return undefined // 用户没配 -> 用模板值
+      if (Array.isArray(userVal)) return userVal // 用户数组整组保留
+      if (lodash.isPlainObject(userVal) && lodash.isPlainObject(tmplVal)) return undefined // 对象递归补缺
+      return userVal // 用户标量/null 标记保留
+    })
+    fs.writeFileSync(cfgPath, jsonApi.stringify(cur), { mode: 0o600 })
+    fs.writeFileSync(markerPath, new Date().toISOString())
+    log.info('[personal-defaults] 已种入个人默认配置到用户层(最高优先级): ' + cfgPath)
+    // 解锁并打开增强模式开关（仅首次；不覆盖用户已显式设置的 false）
+    const settingPath = _getSettingsPath()
+    let setting = {}
+    try {
+      if (fs.existsSync(settingPath)) {
+        setting = jsonApi.parse(fs.readFileSync(settingPath, 'utf8')) || {}
+      }
+    } catch {
+      setting = {}
+    }
+    if (setting.overwall !== false) {
+      setting.overwall = true
+      try {
+        fs.writeFileSync(settingPath, jsonApi.stringify(setting))
+        log.info('[personal-defaults] 已默认开启增强模式开关(setting.overwall=true)')
+      } catch (e) {
+        log.warn('[personal-defaults] 写 setting.json 失败(可手动开启): ' + (e && e.message))
+      }
+    }
+  } catch (e) {
+    log.error('[personal-defaults] 种入失败(不影响启动): ' + ((e && e.stack) || e))
   }
-  const ret = target(param)
-  // log.info('api:', api, 'ret:', ret)
-  return ret
+}
+
+/** 兜底适配器自启动（conf.enabled === false 时跳过），并幂等注册 overwall 自定义服务器 */
+async function autoStartAdapter () {
+  try {
+    const conf = adapterApi.confGet()
+    if (conf.enabled === false) {
+      log.info('[adapter] 兜底适配器开关为关，跳过自启动')
+      return
+    }
+    const ret = await adapterApi.start()
+    if (ret && ret.ok) {
+      log.info('[adapter] 兜底适配器已自启动' + (ret.adopted ? '(收养外部实例)' : (ret.pid ? ' pid=' + ret.pid : '')))
+      try {
+        await adapterApi.integrateOverwall()
+      } catch (e) {
+        log.warn('[adapter] overwall 自动接入失败(可在兜底适配器页手动接入): ' + (e && e.message))
+      }
+    } else {
+      log.warn('[adapter] 兜底适配器自启动未就绪: ' + ((ret && ret.msg) || 'unknown'))
+    }
+  } catch (e) {
+    log.warn('[adapter] 兜底适配器自启动失败(可在兜底适配器页手动启动): ' + (e && e.message))
+  }
 }
 
 async function doStart () {
@@ -420,11 +532,15 @@ async function doStart () {
   emitConfigChanged()
   // 启动所有（首页开关无需等待配置下载）
   localApi.startup()
+  // 兜底适配器自启动（fire-and-forget，不阻塞代理服务启动）
+  autoStartAdapter()
 }
 
 export default {
   install ({ win }) {
     currentWin = win
+    // 首次安装种入个人默认配置（config.json 用户层，最高优先级，不被远程覆盖）
+    ensurePersonalDefaults()
     // 接收view的方法调用
     ipcMain.handle('apiInvoke', async (event, args) => {
       const api = args[0]
@@ -464,4 +580,5 @@ export default {
   },
   devSidecar: DevSidecar,
   invoke,
+  adapter: adapterApi,
 }
