@@ -84,7 +84,7 @@ export default defineComponent({
     async start () {
       this.starting = true
       try {
-        const ret = await this.$api.adapter.start()
+        const ret = await this.$api.adapter.startWithOverwallRestore()
         if (ret && ret.already) {
           this.$message.info('适配器已在运行中')
         } else if (ret && ret.ok) {
@@ -115,32 +115,6 @@ export default defineComponent({
         await this.stop()
       } else {
         await this.start()
-      }
-    },
-
-    async restart () {
-      this.starting = true
-      try {
-        const ret = await this.$api.adapter.restart()
-        if (ret && ret.ok) {
-          this.$message.success('适配器已重启')
-        } else {
-          this.$message.warning((ret && ret.msg) || '重启后未监听，请查看日志')
-        }
-      } catch (e) {
-        this.$message.error(`重启失败：${e.message || e}`)
-      } finally {
-        this.starting = false
-        await Promise.all([this.refreshStatus(), this.refreshLogs()])
-      }
-    },
-
-    async integrateOverwall () {
-      try {
-        await this.$api.adapter.integrateOverwall()
-        this.$message.success('已把适配器注册为增强功能(overwall)自定义服务器 ID 1，请重启加速服务后生效')
-      } catch (e) {
-        this.$message.error(`接入失败：${e.message || e}`)
       }
     },
 
@@ -193,60 +167,10 @@ export default defineComponent({
           </div>
         </a-form-item>
 
-        <a-form-item label="监听端口">
-          <a-input-number v-model:value="conf.port" :min="1024" :max="65535" style="width: 180px" />
-          <div class="form-help">
-            适配器在本机监听的端口，默认 8470。修改保存后自动生效（加速服务运行中会自动热重启同步，约数秒中断）。
-          </div>
-        </a-form-item>
-
         <a-form-item label="兜底代理 upstream">
           <a-input v-model:value="conf.upstream" placeholder="http://127.0.0.1:7890" allow-clear />
           <div class="form-help">
             直连失败时转发到的代理地址。默认是本机 7890 端口的代理软件；以后换其他 VPN 软件，只改这个地址即可。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="上游协议">
-          <a-radio-group v-model:value="conf.upstreamType">
-            <a-radio-button value="auto">auto 自动探测</a-radio-button>
-            <a-radio-button value="http">http 代理</a-radio-button>
-            <a-radio-button value="socks">socks5 代理</a-radio-button>
-          </a-radio-group>
-          <div class="form-help">
-            默认 auto：引擎会先后尝试 http CONNECT 和 socks5 两种方式连接 upstream，探测成功后记住结果。上游软件只支持其中一种协议时可手动指定，避免每次失败都重试另一种。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="兜底代理超时（毫秒）">
-          <a-input-number v-model:value="conf.fallbackTimeoutMs" :min="5000" :max="60000" :step="1000" style="width: 180px" />
-          <div class="form-help">
-            通过 upstream 建立连接+发送请求的最长等待时间，默认 25000 毫秒。上游节点慢时可适当调大。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="请求总预算（毫秒）">
-          <a-input-number v-model:value="conf.requestBudgetMs" :min="10000" :max="120000" :step="1000" style="width: 180px" />
-          <div class="form-help">
-            单个请求的总时间预算（直连+兜底合计），默认 30000 毫秒，需保持小于 DevSidecar 的 40 秒上限，避免上层先超时。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="直连超时（毫秒）">
-          <a-input-number v-model:value="conf.directTimeoutMs" :min="200" :max="10000" :step="100" style="width: 180px" />
-          <div class="form-help">
-            每个请求先试直连的最长等待时间，默认 1000 毫秒。被墙域名直连会等到超时才降级，超时越短切换越快，但太短容易误伤慢网站。
-          </div>
-        </a-form-item>
-
-        <a-form-item label="直连跳过域名">
-          <a-textarea
-            v-model:value="directSkipHostsText"
-            :rows="5"
-            placeholder="auth.openai.com&#10;chatgpt.com&#10;.claude.com"
-          />
-          <div class="form-help">
-            每行一个域名（支持 .example.com 后缀匹配）。命中的域名不尝试直连，直接走兜底代理——用于「直连能连上但内容被地区封锁」的站点（如 claude.com 返回封锁页、auth.openai.com 返回 403）。保存后立即生效，无需重启。
           </div>
         </a-form-item>
 
@@ -256,7 +180,7 @@ export default defineComponent({
               {{ status.overwallRegistered ? '已接入增强功能' : '未接入增强功能' }}
             </a-tag>
             <span class="form-help-inline">
-              {{ status.overwallRegistered ? '增强模式流量经本适配器兜底（直连优先 → 失败转 upstream）' : '启动适配器后自动完成接入' }}
+              {{ status.overwallRegistered ? '增强模式流量经本适配器兜底（直连优先 → 失败转 upstream）' : '启动适配器后自动完成接入；未启动时增强模式自动走官方回退服务器或默认模式直连' }}
             </span>
           </a-space>
           <div class="form-help">
@@ -284,45 +208,61 @@ export default defineComponent({
         </a-form-item>
 
         <a-collapse style="margin-bottom: 16px">
-          <a-collapse-panel key="secret" header="高级：鉴权凭据（自动生成，自动管理，通常无需查看）">
-            <a-space direction="vertical" :size="4" style="width: 100%">
-              <a-input :value="conf.secret" readonly>
-                <template #addonBefore>secret</template>
-              </a-input>
-              <a-input :value="conf.password" readonly>
-                <template #addonBefore>password</template>
-                <template #addonAfter>
-                  <span class="form-help-inline">仅 DevSidecar 内核与本适配器之间回环通信使用</span>
-                </template>
-              </a-input>
-            </a-space>
-            <div class="form-help">
-              这两个凭据由适配器启动时自动生成，接入增强功能时自动写入内核注册，全程无需手动输入。接入任何兜底软件（Clash/V2Ray 等）只需修改上面的 upstream 地址。若担心泄露，可删除 conf.json 中的 secret/password 字段并重启适配器，会自动重新生成。
-            </div>
+          <a-collapse-panel key="advanced" header="高级参数（默认值即可用，一般无需修改）">
+            <a-form :label-col="{ span: 5 }" :wrapper-col="{ span: 19 }">
+              <a-form-item label="监听端口">
+                <a-input-number v-model:value="conf.port" :min="1024" :max="65535" style="width: 180px" />
+                <div class="form-help">
+                  适配器在本机监听的端口，默认 8470。修改保存后自动生效（加速服务运行中会自动热重启同步，约数秒中断）。
+                </div>
+              </a-form-item>
+
+              <a-form-item label="上游协议">
+                <a-radio-group v-model:value="conf.upstreamType">
+                  <a-radio-button value="auto">auto 自动探测</a-radio-button>
+                  <a-radio-button value="http">http 代理</a-radio-button>
+                  <a-radio-button value="socks">socks5 代理</a-radio-button>
+                </a-radio-group>
+                <div class="form-help">
+                  默认 auto：引擎会先后尝试 http CONNECT 和 socks5 两种方式连接 upstream，探测成功后记住结果。上游软件只支持其中一种协议时可手动指定。
+                </div>
+              </a-form-item>
+
+              <a-form-item label="兜底代理超时（毫秒）">
+                <a-input-number v-model:value="conf.fallbackTimeoutMs" :min="5000" :max="60000" :step="1000" style="width: 180px" />
+                <div class="form-help">
+                  通过 upstream 建立连接+发送请求的最长等待时间，默认 25000 毫秒。上游节点慢时可适当调大。
+                </div>
+              </a-form-item>
+
+              <a-form-item label="请求总预算（毫秒）">
+                <a-input-number v-model:value="conf.requestBudgetMs" :min="10000" :max="120000" :step="1000" style="width: 180px" />
+                <div class="form-help">
+                  单个请求的总时间预算（直连+兜底合计），默认 30000 毫秒，需保持小于 DevSidecar 的 40 秒上限，避免上层先超时。
+                </div>
+              </a-form-item>
+
+              <a-form-item label="直连超时（毫秒）">
+                <a-input-number v-model:value="conf.directTimeoutMs" :min="200" :max="10000" :step="100" style="width: 180px" />
+                <div class="form-help">
+                  每个请求先试直连的最长等待时间，默认 1000 毫秒。被墙域名直连会等到超时才降级，超时越短切换越快，但太短容易误伤慢网站。
+                </div>
+              </a-form-item>
+
+              <a-form-item label="直连跳过域名">
+                <a-textarea
+                  v-model:value="directSkipHostsText"
+                  :rows="4"
+                  placeholder="auth.openai.com&#10;.claude.com"
+                />
+                <div class="form-help">
+                  每行一个域名（支持 .example.com 后缀匹配）。命中的域名不尝试直连，直接走兜底代理——仅用于「直连能连上但内容被地区封锁」的站点。保存后立即生效。
+                </div>
+              </a-form-item>
+            </a-form>
           </a-collapse-panel>
         </a-collapse>
 
-        <a-collapse style="margin-bottom: 16px">
-          <a-collapse-panel key="ops" header="高级：手动操作（通常无需使用）">
-            <a-space wrap style="margin-bottom: 4px">
-              <a-button type="primary" :loading="starting" @click="start()">
-                启动
-              </a-button>
-              <a-button :loading="starting" @click="restart()">
-                重启
-              </a-button>
-              <a-button danger @click="stop()">
-                停止
-              </a-button>
-              <a-button @click="integrateOverwall()">
-                重新注册增强功能
-              </a-button>
-            </a-space>
-            <div class="form-help" style="margin-bottom: 8px">
-              手动操作仅用于排查异常：正常使用中适配器随应用自动启动/停止，配置保存自动热生效，无需重启。若怀疑运行异常，可点「重启」恢复。
-            </div>
-          </a-collapse-panel>
-        </a-collapse>
         <a-form-item label="运行日志">
           <a-textarea :value="logs" readonly :rows="10" class="log-view" />
         </a-form-item>

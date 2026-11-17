@@ -49,6 +49,24 @@ function readUserSetting () {
   return {}
 }
 
+/** 写 setting.json 的 overwall 开关(停止/启动适配器联动增强模式) */
+function writeUserSettingOverwall (v) {
+  try {
+    const base = process.env.DEV_SIDECAR_USER_BASE
+      || path.join(process.env.HOME || '', '.dev-sidecar')
+    const settingPath = path.join(base, 'setting.json')
+    let setting = {}
+    if (fs.existsSync(settingPath)) {
+      setting = jsonApi.parse(fs.readFileSync(settingPath, 'utf8')) || {}
+    }
+    setting.overwall = v
+    fs.writeFileSync(settingPath, jsonApi.stringify(setting))
+    log.info('[adapter] 已' + (v ? '开启' : '关闭') + '增强模式开关(setting.overwall=' + v + ')')
+  } catch (e) {
+    log.warn('[adapter] 写 setting.json 失败:', e && e.message)
+  }
+}
+
 // 路径惰性解析: ESM import 提升会先于 backend.js 的模块体执行,
 // 而 DS_EXTRA_PATH 是 backend.js 在打包后设置的资源目录(resources/extra),
 // 因此每次调用时再解析, 不能在模块加载期固化
@@ -234,11 +252,42 @@ function killPid (pid) {
   } catch {}
 }
 
+/**
+ * 探测官方增强回退服务器是否可达(TCP 握手即可, 3 秒超时)。
+ * 停止适配器摘除注册后, 增强流量回落到官方服务器;
+ * 可达 -> 官方回退路径正常, 保留增强开关;
+ * 不可达 -> 自动关闭增强开关, 让增强域名走默认模式预设IP直连。
+ */
+function probeOfficialOverwall (timeoutMs = 3000) {
+  // 与内核 overwall 插件 serverDefault 保持一致(ds-core core/src/modules/plugin/overwall/config.js)
+  const hosts = ['ow-prod.docmirror.top:443']
+  const tryOne = (host, port) => new Promise((resolve) => {
+    const sock = net.connect({ host, port })
+    const done = (v) => {
+      sock.destroy()
+      resolve(v)
+    }
+    sock.setTimeout(timeoutMs)
+    sock.once('connect', () => done(true))
+    sock.once('timeout', () => done(false))
+    sock.once('error', () => done(false))
+  })
+  return (async () => {
+    for (const h of hosts) {
+      const [host, port] = h.split(':')
+      if (await tryOne(host, Number(port))) return true
+    }
+    return false
+  })()
+}
+
 // ---------- 管理器 ----------
 let child = null
 let exiting = false
 let suppressRestartOnExit = false
 let crashRestarts = 0
+// 停止适配器时自动关闭了增强开关; 重启适配器时据此恢复
+let autoDisabledOverwall = false
 
 function isAlive () {
   return !!(child && child.pid && child.exitCode === null && !child.killed)
@@ -500,6 +549,25 @@ const adapterApi = {
       } catch (e) {
         log.warn('[adapter] 停止后移除 overwall 注册失败:', e && e.message)
       }
+      // 自适应回退探测: 注册摘除后增强流量回落官方服务器;
+      // 官方服务器可达 -> 保留增强开关(官方回退正常工作, 与官方行为一致);
+      // 不可达 -> 自动关闭增强开关(增强流量走默认模式预设IP直连, 保住 Google),
+      // 并在下次 startWithOverwallRestore 时自动恢复
+      import('@blue-frontier/dev-sidecar').then(async ({ default: DevSidecar }) => {
+        try {
+          if (!DevSidecar.api.status.get().server?.enabled) return
+          if (await probeOfficialOverwall()) return
+          const setting = readUserSetting()
+          if (setting.overwall === true) {
+            autoDisabledOverwall = true
+            writeUserSettingOverwall(false)
+            await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath(), setting: readUserSetting() })
+            log.info('[adapter] 官方回退服务器不可达, 已自动关闭增强模式(启动适配器时会自动恢复)')
+          }
+        } catch (e) {
+          log.warn('[adapter] 回退探测失败(保持现状):', e && e.message)
+        }
+      })
     }
     return out
   },
@@ -509,6 +577,29 @@ const adapterApi = {
     this._stopProcessOnly()
     await new Promise(r => setTimeout(r, 300))
     return this.start()
+  },
+
+  /**
+   * 启动并恢复增强模式: 之前停止适配器时若自动关闭过增强开关,
+   * 这里自动开回(带 setting 热重启), 用户无需二次手动操作
+   */
+  async startWithOverwallRestore () {
+    const ret = await this.start()
+    if (ret && ret.ok && autoDisabledOverwall) {
+      autoDisabledOverwall = false
+      writeUserSettingOverwall(true)
+      try {
+        const { default: DevSidecar } = await import('@blue-frontier/dev-sidecar')
+        if (DevSidecar.api.status.get().server?.enabled) {
+          const setting = readUserSetting()
+          await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath(), setting })
+        }
+      } catch (e) {
+        log.warn('[adapter] 恢复增强模式热重启失败:', e && e.message)
+      }
+      await this.integrateOverwall()
+    }
+    return ret
   },
 
   /** 读取引擎真实运行日志 adapter.log 尾部 */
