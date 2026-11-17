@@ -633,7 +633,7 @@ const server = http.createServer(async (req, res) => {
     }
   }
   log('FAIL', host, 'direct=' + (directErr ? directErr.message : 'n/a'), 'fallback=' + (lastErr ? lastErr.message : 'n/a'), Date.now() - t0 + 'ms');
-  if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' }).end('proxy-suite: direct=' + (directErr ? directErr.message : 'n/a') + '; fallback=' + (lastErr ? lastErr.message : 'n/a'));
+  if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' }).end('proxy-suite: direct=' + (directErr ? directErr.message : 'n/a') + '; fallback=' + (lastErr ? lastErr.message : 'n/a') + '; adapter-upstream-down: ' + UP.host + ':' + UP.port + ' unreachable');
   else res.destroy();
 });
 
