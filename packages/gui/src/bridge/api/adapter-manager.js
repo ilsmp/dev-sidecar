@@ -139,7 +139,8 @@ function syncPresetFromUserConfig (P, conf) {
   try {
     const userCfgPath = process.env.DEV_SIDECAR_USER_CONFIG
       || path.join(process.env.HOME || '', '.dev-sidecar', 'config.json')
-    if (!fs.existsSync(userCfgPath)) return false
+    if (!fs.existsSync(userCfgPath))
+      return false
     let user = null
     try {
       user = JSON.parse(fs.readFileSync(userCfgPath, 'utf8'))
@@ -147,17 +148,22 @@ function syncPresetFromUserConfig (P, conf) {
       return false
     }
     const list = lodash.get(user, 'server.preSetIpList')
-    if (!list || typeof list !== 'object' || Array.isArray(list)) return false
+    if (!list || typeof list !== 'object' || Array.isArray(list))
+      return false
     const picked = {}
     for (const [pattern, ipMap] of Object.entries(list)) {
-      if (!ipMap || typeof ipMap !== 'object') continue
+      if (!ipMap || typeof ipMap !== 'object')
+        continue
       const ips = {}
       for (const [ip, on] of Object.entries(ipMap)) {
-        if (on && /^[0-9.]+$/.test(ip)) ips[ip] = true
+        if (on && /^[0-9.]+$/.test(ip))
+          ips[ip] = true
       }
-      if (Object.keys(ips).length) picked[pattern] = ips
+      if (Object.keys(ips).length)
+        picked[pattern] = ips
     }
-    if (!Object.keys(picked).length) return false
+    if (!Object.keys(picked).length)
+      return false
     conf.preSetHosts = picked
     return true
   } catch (e) {
