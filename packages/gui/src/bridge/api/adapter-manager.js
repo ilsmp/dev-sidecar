@@ -265,8 +265,9 @@ function spawnServer (P) {
       child = null
     }
     // 崩溃守护: 非主动停止的意外退出自动拉起(退避 1s/2s/3s, 最多3次);
-    // code===0 或 suppressRestartOnExit 表示主动 stop()/confSave 关闭, 不守护
-    if (!exiting && !suppressRestartOnExit && code !== 0) {
+    // code===0 / SIGTERM / suppressRestartOnExit 表示主动 stop()/confSave 关闭, 不守护
+    const cleanExit = code === 0 || signal === 'SIGTERM'
+    if (!exiting && !suppressRestartOnExit && !cleanExit) {
       crashRestarts += 1
       if (crashRestarts <= 3) {
         const delayMs = 1000 * crashRestarts
@@ -346,12 +347,8 @@ const adapterApi = {
     writeConf(P, conf)
     // 开关关闭: 移除 overwall 注册, 避免增强功能域名指向已停止的适配器
     if (conf.enabled === false) {
+      // stop() 默认会一并摘除 overwall 注册(内部热重启带 setting)
       this.stop()
-      try {
-        await this.unintegrateOverwall()
-      } catch (e) {
-        log.warn('[adapter] 移除 overwall 注册失败(可忽略):', e)
-      }
       return conf
     }
     if (!identityChanged) {
