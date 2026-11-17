@@ -213,7 +213,7 @@ export default defineComponent({
               <a-form-item label="监听端口">
                 <a-input-number v-model:value="conf.port" :min="1024" :max="65535" style="width: 180px" />
                 <div class="form-help">
-                  适配器在本机监听的端口，默认 8470。修改保存后自动生效（加速服务运行中会自动热重启同步，约数秒中断）。
+                  适配器在本机监听的端口，默认 6666。修改保存后自动生效（加速服务运行中会自动热重启同步，约数秒中断）。
                 </div>
               </a-form-item>
 

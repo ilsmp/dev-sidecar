@@ -101,7 +101,7 @@ check('no match returns null', presetResolve('example.com') === null)
     const confP = path.join(work, 'conf.json')
     const srvSrc = path.resolve('packages/gui/extra/adapter/server.cjs')
     fs.writeFileSync(confP, JSON.stringify({ port: 18479, secret: 'test000000', password: 'testpassword000000', upstream: 'http://127.0.0.1:7890', preSetHosts: { 'example.com': { '93.184.216.34': true } } }))
-    const child = spawn(electronBin, [srvSrc], {
+    const child = spawn(electronBin, ['--max-http-header-size=262144', srvSrc], {
       cwd: work,
       env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', ADAPTER_CONF: confP, ADAPTER_PID: path.join(work, 'a.pid'), ADAPTER_LOG: path.join(work, 'a.log') },
       stdio: 'ignore',

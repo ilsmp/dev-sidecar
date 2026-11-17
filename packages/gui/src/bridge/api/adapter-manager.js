@@ -87,7 +87,7 @@ function resolvePaths () {
 
 const DEFAULT_CONF = {
   enabled: true,
-  port: 8470,
+  port: 6666,
   secret: '',
   password: '',
   upstream: 'http://127.0.0.1:7890',
@@ -114,10 +114,7 @@ function writeConf (P, conf) {
 }
 
 function generateSecrets () {
-  return {
-    secret: crypto.randomBytes(6).toString('hex'),
-    password: crypto.randomBytes(12).toString('hex'),
-  }
+  return { secret: crypto.randomBytes(6).toString('hex') }
 }
 
 function sanitizeConf (merged) {
@@ -149,8 +146,8 @@ function sanitizeConf (merged) {
   if (!conf.preSetHosts || typeof conf.preSetHosts !== 'object' || Array.isArray(conf.preSetHosts)) {
     conf.preSetHosts = {}
   }
-  if (!conf.secret || !conf.password) {
-    Object.assign(conf, generateSecrets())
+  if (!conf.secret) {
+    conf.secret = generateSecrets().secret
   }
   return conf
 }
@@ -296,7 +293,9 @@ function isAlive () {
 function spawnServer (P) {
   const out = fs.openSync(P.outLog, 'a')
   const err = fs.openSync(P.errLog, 'a')
-  const spawned = spawn(process.execPath, [P.serverJs], {
+  // --max-http-header-size=256KB: ChatGPT 网页版巨型请求头(cookie+sentinel token)
+  // 超过 Node 默认 16KB 会被适配器 400 拒绝(2026-11-17 定位)
+  const spawned = spawn(process.execPath, ['--max-http-header-size=262144', P.serverJs], {
     cwd: P.dir,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['ignore', out, err],
@@ -369,8 +368,8 @@ const adapterApi = {
         dirty = true
       }
     }
-    if (!conf.secret || !conf.password) {
-      Object.assign(conf, generateSecrets())
+    if (!conf.secret) {
+      conf.secret = generateSecrets().secret
       dirty = true
     }
     if (dirty) {
@@ -391,7 +390,7 @@ const adapterApi = {
     const cur = this.confGet()
     const P = resolvePaths()
     const conf = sanitizeConf(Object.assign({}, cur, patch || {}))
-    const identityChanged = conf.port !== cur.port || conf.secret !== cur.secret || conf.password !== cur.password
+    const identityChanged = conf.port !== cur.port || conf.secret !== cur.secret
     const enabledChanged = conf.enabled !== cur.enabled
     writeConf(P, conf)
     // 开关关闭: 移除 overwall 注册, 避免增强功能域名指向已停止的适配器
@@ -426,7 +425,20 @@ const adapterApi = {
     const conf = this.confGet()
     const alive = isAlive()
     const healthy = await healthz(conf.port, conf.secret)
-    const overwallRegistered = await this._overwallRegistered(conf)
+    let overwallRegistered = await this._overwallRegistered(conf)
+    // 注册自愈: 适配器健康但注册条目漂移(如内核 vault 迁移清空口令/旧版残留)时,
+    // 静默重注册; 3 秒轮询的页面打开期间任何漂移都会在下一次轮询内被修复
+    if (healthy && conf.enabled !== false && !overwallRegistered) {
+      try {
+        const ret = await this.integrateOverwall()
+        if (ret && ret.ok && !ret.unchanged) {
+          log.info('[adapter] 检测到 overwall 注册漂移, 已自动重注册')
+        }
+        overwallRegistered = true
+      } catch (e) {
+        log.warn('[adapter] overwall 注册自愈失败(保留未接入状态):', e && e.message)
+      }
+    }
     let adoptedPid = null
     if (!alive && healthy) {
       adoptedPid = readPid(P)
@@ -452,7 +464,7 @@ const adapterApi = {
         type: 'path',
         port: conf.port,
         path: conf.secret,
-        password: conf.password,
+        password: '', // 内核 vault 迁移会把明文口令清空, 比对必须以空口令为基准
       }
       return lodash.isEqual(lodash.get(cfg, ['plugin', 'overwall', 'server', 'http://127.0.0.1']), target)
     } catch {
@@ -512,7 +524,7 @@ const adapterApi = {
   _stopProcessOnly () {
     const P = resolvePaths()
     // 主动停止: 抑制崩溃守护, 并摘除 overwall 注册
-    // (增强模式开着时注册不摘会让增强流量指向已停止的 8470 端口, 全部请求失败)
+    // (增强模式开着时注册不摘会让增强流量指向已停止的适配器端口, 全部请求失败)
     suppressRestartOnExit = true
     crashRestarts = 0
     if (isAlive()) {
@@ -654,7 +666,7 @@ const adapterApi = {
       type: 'path',
       port: conf.port,
       path: conf.secret,
-      password: conf.password,
+      password: '', // 与 _overwallRegistered 一致: vault 迁移后配置里口令恒为空
     }
     // 幂等短路: 注册已一致时跳过保存与内核重启, 避免 autoStart/切模式反复触发无谓热重启
     if (lodash.isEqual(ow.server[key], target)) {

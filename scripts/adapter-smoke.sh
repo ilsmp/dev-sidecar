@@ -40,7 +40,7 @@ check() {
 
 # ---- start on PORT ----
 write_conf "$PORT"
-ADAPTER_CONF="$CONF_WORK" ADAPTER_PID="$PID_WORK" ADAPTER_LOG="$LOG_WORK" node "$ADAPTER_DIR/server.cjs" &
+ADAPTER_CONF="$CONF_WORK" ADAPTER_PID="$PID_WORK" ADAPTER_LOG="$LOG_WORK" node --max-http-header-size=262144 "$ADAPTER_DIR/server.cjs" &
 SERVER_PID=$!
 for i in $(seq 1 50); do
   if curl -sf "http://127.0.0.1:$PORT/healthz?secret=$SECRET" >/dev/null 2>&1; then break; fi
@@ -50,18 +50,18 @@ done
 check healthz-ok 200 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz?secret=$SECRET")"
 check healthz-bad 403 "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$PORT/healthz?secret=wrong")"
 
-check path-noauth 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/$SECRET/example.com/")"
-code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 -H "dspassword: $PASSWORD" "http://127.0.0.1:$PORT/$SECRET/example.com/" || true)
+# password 鉴权已废弃(secret 即唯一凭据): 无 dspassword 头也应放行
+code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:$PORT/$SECRET/example.com/" || true)
 check path-auth 200 "$code"
-check path-badpw 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'dspassword: wrong' "http://127.0.0.1:$PORT/$SECRET/example.com/" || true)"
+check badsecret 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/wrongsecret0000/example.com/" || true)"
 
-check loopback-block 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H "dspassword: $PASSWORD" "http://127.0.0.1:$PORT/$SECRET/127.0.0.1:1/" || true)"
+check loopback-block 403 "$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:$PORT/$SECRET/127.0.0.1:1/" || true)"
 
 # ---- hot reload directSkipHosts ----
 write_conf "$PORT"
 python3 -c "import io, json, sys; p = sys.argv[1]; c = json.load(io.open(p)); c['directSkipHosts'] = ['smoke-test-invalid.example']; io.open(p, 'w').write(json.dumps(c, indent=2))" "$CONF_WORK"
 sleep 4
-curl -s -o /dev/null --max-time 20 -H "dspassword: $PASSWORD" "http://127.0.0.1:$PORT/$SECRET/smoke-test-invalid.example/" || true
+curl -s -o /dev/null --max-time 20 "http://127.0.0.1:$PORT/$SECRET/smoke-test-invalid.example/" || true
 sleep 1
 if grep -q "DIRECT-SKIP-CONFIG" "$LOG_WORK" 2>/dev/null; then
   echo "PASS hot-reload"

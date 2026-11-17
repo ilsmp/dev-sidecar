@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 /**
  * DevSidecar 二层代理适配器：DoH 直连优先 + 兜底上游(可配置/热更新) + 重试
- * 协议: http://127.0.0.1:{port}/{secret}/{真实域名}[:port]{原始path} + header dspassword
+ * 协议: http://127.0.0.1:{port}/{secret}/{真实域名}[:port]{原始path}
+ * 鉴权: 仅 secret(path 首段, 12位随机hex); 只监听 127.0.0.1, 不再用 dspassword(password
+ *       已废弃: 新版内核会把明文口令迁入系统钥匙串导致配置比对永远不等, 且 ChatGPT 网页版
+ *       巨型请求头场景下该冗余头毫无必要)
  */
 'use strict';
 const http = require('node:http');
@@ -17,11 +20,14 @@ const CONF_PATH = process.env.ADAPTER_CONF || path.join(__dirname, 'conf.json');
 const PID_PATH = process.env.ADAPTER_PID || path.join(__dirname, 'adapter.pid');
 const LOG_PATH = process.env.ADAPTER_LOG || path.join(__dirname, 'adapter.log');
 const CONF = {};
+// 注意: 入站请求头上限只能用 node --max-http-header-size 启动参数调大(GUI 拉起时已传 256KB),
+// http.maxHeaderSize 是只读的。ChatGPT 网页版巨型请求头(cookie+sentinel)超过 Node 默认 16KB 会被 400 拒绝。
 let UP = new URL('http://127.0.0.1:7890');
 function applyConf(next) {
-  CONF.port = Number(next.port) || 8470;
+  CONF.port = Number(next.port) || 6666;
   CONF.secret = String(next.secret || '');
-  CONF.password = String(next.password || '');
+  // password 字段仅为兼容旧 conf 保留, 不再参与鉴权
+  CONF.password = '';
   CONF.upstream = String(next.upstream || 'http://127.0.0.1:7890');
   CONF.upstreamType = String(next.upstreamType || 'auto');
   CONF.directTimeoutMs = Number(next.directTimeoutMs) || 1000;
@@ -139,11 +145,11 @@ setInterval(() => {
     if (st.mtimeMs === confMtime) return;
     confMtime = st.mtimeMs;
     const next = JSON.parse(fs.readFileSync(CONF_PATH, 'utf8'));
-    const oldPort = Number(CONF.port || 8470);
+    const oldPort = Number(CONF.port || 6666);
     applyConf(next);
     modeCache = null;
     log('CONFIG-RELOADED', 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'port=' + CONF.port, 'directSkipHosts=' + directSkipHosts.size);
-    const newPort = Number(CONF.port || 8470);
+    const newPort = Number(CONF.port || 6666);
     if (oldPort !== newPort) restartListen(newPort);
   } catch (e) { log('config reload error', e); }
 }, 3000);
@@ -187,7 +193,7 @@ function dohResolve(hostname) {
         path: '/resolve?name=' + encodeURIComponent(hostname) + '&type=A',
         method: 'GET',
         timeout: 4000,
-        maxHeaderSize: 65536,
+        maxHeaderSize: 256 * 1024,
       },
       (res) => {
         let buf = '';
@@ -431,7 +437,7 @@ function httpsOver(connectFn, targetHost, targetPort, method, reqPath, headers, 
         // 注意: 不能设 agent:false —— 那会忽略 createConnection 改为自行 net.connect(系统DNS会被污染)
         createConnection: connectFn,
         timeout: timeoutMs || CONF.directTimeoutMs,
-        maxHeaderSize: 65536,
+        maxHeaderSize: 256 * 1024,
       },
       (res) => { clearTimeout(hardTo); req.setTimeout(0); resolve(res); }
     );
@@ -497,13 +503,6 @@ try {
   process.exit(1);
 }
 
-function timingSafeEq(a, b) {
-  const ab = Buffer.from(String(a || ''));
-  const bb = Buffer.from(String(b || ''));
-  if (ab.length !== bb.length) return false;
-  return crypto.timingSafeEqual(ab, bb);
-}
-
 // 明文 http(仅 127.0.0.1): 本地回环无证书, 从根上消除 UNABLE_TO_VERIFY_LEAF_SIGNATURE
 const server = http.createServer(async (req, res) => {
   // 健康检查(管理器收养/启动探测用)
@@ -518,7 +517,7 @@ const server = http.createServer(async (req, res) => {
   }
   const m = /^\/([^/]+)\/([^/:]+)(?::([0-9]+))?(\/.*)?$/.exec(req.url);
   if (!m) { log('REJECT-nopath', req.url.slice(0, 120)); return res.writeHead(404).end('not found'); }
-  if (m[1] !== CONF.secret || !timingSafeEq(req.headers.dspassword, CONF.password)) { log('REJECT-auth', req.url.slice(0, 60)); return res.writeHead(403).end('forbidden'); }
+  if (!CONF.secret || m[1] !== CONF.secret) { log('REJECT-auth', req.url.slice(0, 60)); return res.writeHead(403).end('forbidden'); }
   const host = m[2];
   const port = m[3] ? Number(m[3]) : 443;
   const reqPath = m[4] || '/';
@@ -614,7 +613,7 @@ const server = http.createServer(async (req, res) => {
 server.on('upgrade', async (req, clientSock, head) => {
   log('UPGRADE', req.url.split('?')[0].slice(0, 80));
   const m = /^\/([^/]+)\/([^/:]+)(?::([0-9]+))?(\/.*)?$/.exec(req.url);
-  if (!m || m[1] !== CONF.secret || !timingSafeEq(req.headers.dspassword, CONF.password)) return clientSock.destroy();
+  if (!m || !CONF.secret || m[1] !== CONF.secret) return clientSock.destroy();
   const host = m[2];
   const port = m[3] ? Number(m[3]) : 443;
   const reqPath = m[4] || '/';
@@ -663,4 +662,4 @@ process.on('SIGTERM', () => { try { fs.unlinkSync(PID_PATH); } catch (e) {} proc
 process.on('exit', () => { try { fs.unlinkSync(PID_PATH); } catch (e) {} });
 // listen 失败(EADDRINUSE 等)只记日志不崩进程: 管理器 healthz 探测不到会拉起新实例自愈
 server.on('error', (e) => log('listen error', (e && e.code) || (e && e.message) || e));
-server.listen(CONF.port || 8470, '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + (CONF.port || 8470), 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'pid=' + process.pid));
+server.listen(CONF.port || 6666, '127.0.0.1', () => log('listening (http)', '127.0.0.1:' + (CONF.port || 6666), 'upstream=' + UP.href, 'directTimeoutMs=' + CONF.directTimeoutMs, 'pid=' + process.pid));
