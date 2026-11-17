@@ -13,6 +13,7 @@ import http from 'node:http'
 import { spawn } from 'node:child_process'
 import log from '../../utils/util.log.gui.js'
 import lodash from 'lodash'
+import jsonApi from '@blue-frontier/mitmproxy/src/json.js'
 
 /** mitmproxy 路径解析(与 backend.js 同源): bridge/api/../mitmproxy.js */
 let _mitmproxyPath = null
@@ -26,6 +27,26 @@ function resolveMitmproxyPath () {
     _mitmproxyPath = ''
   }
   return _mitmproxyPath
+}
+
+/**
+ * 读取用户 setting.json 的开关状态(与 backend.js localApi.setting.load 同源:
+ * 增强模式 overwall 等开关保存在用户目录 setting.json, 不在 config.json)。
+ * 内核 server.start/restart 依赖 setting.overwall 决定是否保留增强插件,
+ * 热重启不带 setting 会导致增强模式被静默关闭(2026-11-17 定位的热重启回归)。
+ */
+function readUserSetting () {
+  try {
+    const base = process.env.DEV_SIDECAR_USER_BASE
+      || path.join(process.env.HOME || '', '.dev-sidecar')
+    const settingPath = path.join(base, 'setting.json')
+    if (fs.existsSync(settingPath)) {
+      return jsonApi.parse(fs.readFileSync(settingPath, 'utf8')) || {}
+    }
+  } catch (e) {
+    log.warn('[adapter] 读取 setting.json 失败(按未开启处理):', e && e.message)
+  }
+  return {}
 }
 
 // 路径惰性解析: ESM import 提升会先于 backend.js 的模块体执行,
@@ -216,6 +237,8 @@ function killPid (pid) {
 // ---------- 管理器 ----------
 let child = null
 let exiting = false
+let suppressRestartOnExit = false
+let crashRestarts = 0
 
 function isAlive () {
   return !!(child && child.pid && child.exitCode === null && !child.killed)
@@ -224,20 +247,43 @@ function isAlive () {
 function spawnServer (P) {
   const out = fs.openSync(P.outLog, 'a')
   const err = fs.openSync(P.errLog, 'a')
-  child = spawn(process.execPath, [P.serverJs], {
+  const spawned = spawn(process.execPath, [P.serverJs], {
     cwd: P.dir,
     env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
     stdio: ['ignore', out, err],
     detached: false,
   })
-  fs.writeFileSync(P.pidFile, `${String(child.pid)}\n`)
-  child.once('exit', () => {
+  child = spawned
+  fs.writeFileSync(P.pidFile, `${String(spawned.pid)}\n`)
+  spawned.once('exit', (code, signal) => {
     try {
-      if (Number.parseInt(fs.readFileSync(P.pidFile, 'utf8'), 10) === child.pid) {
+      if (Number.parseInt(fs.readFileSync(P.pidFile, 'utf8'), 10) === spawned.pid) {
         fs.unlinkSync(P.pidFile)
       }
     } catch {}
-    child = null
+    if (child === spawned) {
+      child = null
+    }
+    // 崩溃守护: 非主动停止的意外退出自动拉起(退避 1s/2s/3s, 最多3次);
+    // code===0 或 suppressRestartOnExit 表示主动 stop()/confSave 关闭, 不守护
+    if (!exiting && !suppressRestartOnExit && code !== 0) {
+      crashRestarts += 1
+      if (crashRestarts <= 3) {
+        const delayMs = 1000 * crashRestarts
+        log.warn(`[adapter] 引擎意外退出(code=${code}, signal=${signal}), ${delayMs}ms 后自动重启(第${crashRestarts}/3次)`)
+        setTimeout(() => {
+          if (!exiting && !suppressRestartOnExit && !isAlive()) {
+            try {
+              spawnServer(P)
+            } catch (e) {
+              log.error('[adapter] 崩溃自动重启失败:', e && e.message)
+            }
+          }
+        }, delayMs)
+      } else {
+        log.error('[adapter] 引擎连续崩溃超过3次, 停止自动重启(手动启动将重置计数)')
+      }
+    }
   })
 }
 
@@ -320,18 +366,10 @@ const adapterApi = {
       return conf
     }
     try {
+      // integrateOverwall 内部已完成热重启(注册新值需内核重建快照), 这里不再重复重启
       await this.integrateOverwall()
     } catch (e) {
       log.warn('[adapter] overwall 重新注册失败, 请手动点接入按钮:', e)
-    }
-    try {
-      const { default: DevSidecar } = await import('@blue-frontier/dev-sidecar')
-      if (DevSidecar.api.status.get().server?.enabled) {
-        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath() })
-        log.info('[adapter] 内核代理已热重启以同步 overwall 注册新值')
-      }
-    } catch (e) {
-      log.warn('[adapter] 内核代理热重启失败(下次手动重启代理服务后生效):', e)
     }
     return conf
   },
@@ -342,6 +380,7 @@ const adapterApi = {
     const conf = this.confGet()
     const alive = isAlive()
     const healthy = await healthz(conf.port, conf.secret)
+    const overwallRegistered = await this._overwallRegistered(conf)
     let adoptedPid = null
     if (!alive && healthy) {
       adoptedPid = readPid(P)
@@ -350,12 +389,31 @@ const adapterApi = {
       running: alive || healthy,
       listening: healthy,
       adopted: !alive && healthy,
+      overwallRegistered,
       pid: alive ? child.pid : adoptedPid,
       conf,
     }
   },
 
   /** 启动: 端口被占时先做健康检查, 是本适配器则直接收养(幂等), 否则明确报错不假活 */
+  /** overwall 注册是否与本适配器当前 conf 一致(仅展示用, 不做修改) */
+  async _overwallRegistered (conf) {
+    try {
+      const { default: DevSidecar } = await import('@blue-frontier/dev-sidecar')
+      const cfg = DevSidecar.api.config.get()
+      const target = {
+        id: 1,
+        type: 'path',
+        port: conf.port,
+        path: conf.secret,
+        password: conf.password,
+      }
+      return lodash.isEqual(lodash.get(cfg, ['plugin', 'overwall', 'server', 'http://127.0.0.1']), target)
+    } catch {
+      return false
+    }
+  },
+
   async start () {
     const P = resolvePaths()
     if (exiting) {
@@ -399,11 +457,18 @@ const adapterApi = {
     if (!ready) {
       return { ok: false, msg: '适配器启动后未通过健康检查, 请查看 adapter.err.log' }
     }
+    // 启动成功: 重置崩溃守护计数(手动重启视为用户已介入)
+    crashRestarts = 0
     return { ok: true, pid: child ? child.pid : null }
   },
 
-  stop () {
+  /** 仅停止适配器进程, 不动 overwall 注册(stop/restart 共用的底层动作) */
+  _stopProcessOnly () {
     const P = resolvePaths()
+    // 主动停止: 抑制崩溃守护, 并摘除 overwall 注册
+    // (增强模式开着时注册不摘会让增强流量指向已停止的 8470 端口, 全部请求失败)
+    suppressRestartOnExit = true
+    crashRestarts = 0
     if (isAlive()) {
       try {
         child.kill()
@@ -418,11 +483,33 @@ const adapterApi = {
         fs.unlinkSync(P.pidFile)
       } catch {}
     }
-    return { ok: true }
+    const out = { ok: true }
+    suppressRestartOnExit = false
+    return out
+  },
+
+  /**
+   * 停止适配器并摘除 overwall 注册。
+   * 默认(keepRegistration 非 true): 注册一并移除, 增强流量立即回官方服务器;
+   * keepRegistration: 只停进程保留注册(restart 内部用, 避免无谓的注册抖动)。
+   */
+  stop (options = {}) {
+    const out = this._stopProcessOnly()
+    if (options.keepRegistration !== true) {
+      try {
+        const cfgPromise = this.unintegrateOverwall()
+        // unintegrateOverwall 内部会热重启内核(带 setting), 不阻塞 stop 返回
+        cfgPromise.catch(e => log.warn('[adapter] 停止后移除 overwall 注册失败:', e && e.message))
+      } catch (e) {
+        log.warn('[adapter] 停止后移除 overwall 注册失败:', e && e.message)
+      }
+    }
+    return out
   },
 
   async restart () {
-    this.stop()
+    // 仅重启适配器进程, 不动注册(注册不变, 内核无需重启)
+    this._stopProcessOnly()
     await new Promise(r => setTimeout(r, 300))
     return this.start()
   },
@@ -474,18 +561,25 @@ const adapterApi = {
     }
     ow.server = ow.server || {}
     const key = 'http://127.0.0.1'
-    ow.server[key] = {
+    const target = {
       id: 1,
       type: 'path',
       port: conf.port,
       path: conf.secret,
       password: conf.password,
     }
+    // 幂等短路: 注册已一致时跳过保存与内核重启, 避免 autoStart/切模式反复触发无谓热重启
+    if (lodash.isEqual(ow.server[key], target)) {
+      return { ok: true, unchanged: true }
+    }
+    ow.server[key] = target
     await DevSidecar.api.config.save(cfg)
     log.info(`[adapter] overwall 自定义服务器已注册: ${key}:${conf.port}/${conf.secret}`)
     try {
       if (DevSidecar.api.status.get().server?.enabled) {
-        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath() })
+        // 同 confSave: 热重启必须带 setting, 否则增强模式会被内核静默关闭
+        const setting = readUserSetting()
+        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath(), setting })
         log.info('[adapter] overwall registered, server hot-restarted')
       }
     } catch (e) {
@@ -513,7 +607,8 @@ const adapterApi = {
     log.info('[adapter] overwall 自定义服务器注册已移除')
     try {
       if (DevSidecar.api.status.get().server?.enabled) {
-        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath() })
+        const setting = readUserSetting()
+        await DevSidecar.api.server.restart({ mitmproxyPath: resolveMitmproxyPath(), setting })
       }
     } catch (e) {
       log.warn('[adapter] 移除注册后热重启失败(下次手动重启生效):', e)

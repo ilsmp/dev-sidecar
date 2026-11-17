@@ -110,6 +110,14 @@ export default defineComponent({
       await this.refreshStatus()
     },
 
+    async toggleRun () {
+      if (this.status && this.status.running) {
+        await this.stop()
+      } else {
+        await this.start()
+      }
+    },
+
     async restart () {
       this.starting = true
       try {
@@ -206,7 +214,7 @@ export default defineComponent({
             <a-radio-button value="socks">socks5 代理</a-radio-button>
           </a-radio-group>
           <div class="form-help">
-            默认 auto：引擎会先后尝诅 http CONNECT 和 socks5 两种方式连接 upstream，探测成功后记住结果。上游软件只支持其中一种协议时可手动指定，避免每次失败都重试另一种。
+            默认 auto：引擎会先后尝试 http CONNECT 和 socks5 两种方式连接 upstream，探测成功后记住结果。上游软件只支持其中一种协议时可手动指定，避免每次失败都重试另一种。
           </div>
         </a-form-item>
 
@@ -242,46 +250,79 @@ export default defineComponent({
           </div>
         </a-form-item>
 
-        <a-form-item label="鉴权凭据">
-          <a-space direction="vertical" :size="4" style="width: 100%">
-            <a-input :value="conf.secret" readonly>
-              <template #addonBefore>secret</template>
-            </a-input>
-            <a-input :value="conf.password" readonly>
-              <template #addonBefore>password</template>
-              <template #addonAfter>
-                <span class="form-help-inline">自动生成，供 DevSidecar 接入时使用</span>
-              </template>
-            </a-input>
+        <a-form-item label="增强功能接入">
+          <a-space wrap>
+            <a-tag :color="status.overwallRegistered ? 'green' : 'orange'">
+              {{ status.overwallRegistered ? '已接入增强功能' : '未接入增强功能' }}
+            </a-tag>
+            <span class="form-help-inline">
+              {{ status.overwallRegistered ? '增强模式流量经本适配器兜底（直连优先 → 失败转 upstream）' : '启动适配器后自动完成接入' }}
+            </span>
           </a-space>
           <div class="form-help">
-            安装/重启时自动生成，泄露后可删除 conf.json 中这两个字段并重启适配器，会自动重新生成。
+            无需手动操作：适配器启动时自动注册为增强功能的自定义服务器，停止时自动移除注册。
           </div>
         </a-form-item>
 
         <a-form-item :wrapper-col="{ offset: 5 }">
           <a-space wrap>
+            <a-button
+              :type="status && status.running ? 'default' : 'primary'"
+              :danger="!!(status && status.running)"
+              :loading="starting"
+              @click="toggleRun()"
+            >
+              {{ status && status.running ? '停止适配器' : '启动适配器' }}
+            </a-button>
             <a-button type="primary" :loading="loading" @click="save()">
               保存配置
             </a-button>
-            <a-button type="primary" :loading="starting" @click="start()">
-              启动
-            </a-button>
-            <a-button :loading="starting" @click="restart()">
-              重启
-            </a-button>
-            <a-button danger @click="stop()">
-              停止
-            </a-button>
-            <a-button @click="integrateOverwall()">
-              接入增强功能(overwall)
-            </a-button>
           </a-space>
           <div class="form-help">
-            「接入增强功能」会把本适配器写为增强功能的自定义服务器 ID 1：增强功能命中的域名走适配器兜底，适配器再按「直连优先 → 失败转 upstream」处理。
+            适配器默认随应用自启动，无需手动管理；「保存配置」后自动热生效，无需重启。
           </div>
         </a-form-item>
 
+        <a-collapse style="margin-bottom: 16px">
+          <a-collapse-panel key="secret" header="高级：鉴权凭据（自动生成，自动管理，通常无需查看）">
+            <a-space direction="vertical" :size="4" style="width: 100%">
+              <a-input :value="conf.secret" readonly>
+                <template #addonBefore>secret</template>
+              </a-input>
+              <a-input :value="conf.password" readonly>
+                <template #addonBefore>password</template>
+                <template #addonAfter>
+                  <span class="form-help-inline">仅 DevSidecar 内核与本适配器之间回环通信使用</span>
+                </template>
+              </a-input>
+            </a-space>
+            <div class="form-help">
+              这两个凭据由适配器启动时自动生成，接入增强功能时自动写入内核注册，全程无需手动输入。接入任何兜底软件（Clash/V2Ray 等）只需修改上面的 upstream 地址。若担心泄露，可删除 conf.json 中的 secret/password 字段并重启适配器，会自动重新生成。
+            </div>
+          </a-collapse-panel>
+        </a-collapse>
+
+        <a-collapse style="margin-bottom: 16px">
+          <a-collapse-panel key="ops" header="高级：手动操作（通常无需使用）">
+            <a-space wrap style="margin-bottom: 4px">
+              <a-button type="primary" :loading="starting" @click="start()">
+                启动
+              </a-button>
+              <a-button :loading="starting" @click="restart()">
+                重启
+              </a-button>
+              <a-button danger @click="stop()">
+                停止
+              </a-button>
+              <a-button @click="integrateOverwall()">
+                重新注册增强功能
+              </a-button>
+            </a-space>
+            <div class="form-help" style="margin-bottom: 8px">
+              手动操作仅用于排查异常：正常使用中适配器随应用自动启动/停止，配置保存自动热生效，无需重启。若怀疑运行异常，可点「重启」恢复。
+            </div>
+          </a-collapse-panel>
+        </a-collapse>
         <a-form-item label="运行日志">
           <a-textarea :value="logs" readonly :rows="10" class="log-view" />
         </a-form-item>
