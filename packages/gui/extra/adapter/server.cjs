@@ -349,6 +349,11 @@ async function socksConnect(connectHost, targetPort) {
       reject(e);
     };
     sock.once('error', fail);
+    // 握手缓冲与阶段状态: 此前 buf 未声明, socks 分支首个 data 事件即抛
+    // ReferenceError(被 uncaughtException 吞掉后握手状态机卡死到 8s tunnel timeout),
+    // 导致 auto 模式下 http 抖动回落 socks 时每次尝试都必然失败, 延迟翻倍。
+    let buf = Buffer.alloc(0);
+    let phase = 'greeting';
     const handler = (d) => {
       buf = Buffer.concat([buf, d]);
       if (phase === 'greeting') {
@@ -375,7 +380,6 @@ async function socksConnect(connectHost, targetPort) {
         resolve(sock);
       }
     };
-    let phase = 'greeting';
     sock.once('connect', () => {
       sock.setKeepAlive(true, 30000);
       // RFC1928: greeting, 无认证
@@ -637,18 +641,41 @@ server.on('upgrade', async (req, clientSock, head) => {
       });
     });
   try {
-    const s = await openDirect();
-    log('UPGRADE-DIRECT', host, Date.now() - t0 + 'ms');
-    send(s);
-  } catch (e1) {
+    // WS 升级与 HTTP 请求共享直连熔断: 配置跳过或近期连续直连失败时直接走兜底, 省掉直连超时等待
+    let directErrMsg = 'direct skipped';
+    const wsDirectAlive = !hostSkipsDirect(host) && !(directSkip.get(host) && Date.now() < directSkip.get(host));
+    if (wsDirectAlive) {
+      try {
+        const s = await openDirect();
+        log('UPGRADE-DIRECT', host, Date.now() - t0 + 'ms');
+        directFails.delete(host);
+        send(s);
+        return;
+      } catch (e1) {
+        directErrMsg = e1.message;
+        const cur = directFails.get(host) || { n: 0, ts: 0 };
+        cur.n += 1; cur.ts = Date.now();
+        directFails.set(host, cur);
+        if (cur.n >= 3) {
+          directSkip.set(host, Date.now() + 600000);
+          directFails.delete(host);
+          log('DIRECT-SKIP', host, '连续直连失败(WS) -> 10分钟内直接走兜底');
+        }
+      }
+    } else {
+      log('UPGRADE-DIRECT-SKIP', host, '熔断/配置命中 -> 直接走兜底');
+    }
     try {
       const s = await tunnelConnect(host, port, { noAlpn: true });
-      log('UPGRADE-FALLBACK', host, 'direct=' + e1.message, Date.now() - t0 + 'ms');
+      log('UPGRADE-FALLBACK', host, 'direct=' + directErrMsg, Date.now() - t0 + 'ms');
       send(s);
     } catch (e2) {
       log('UPGRADE-FAIL', host, e2);
       clientSock.destroy();
     }
+  } catch (outer) {
+    log('UPGRADE-FATAL', host, outer);
+    clientSock.destroy();
   }
 });
 
