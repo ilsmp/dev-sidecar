@@ -560,10 +560,17 @@ async function doStart () {
     },
   })
   emitConfigChanged()
-  // 启动所有（首页开关无需等待配置下载）
+  // 先把兜底适配器拉起来并完成 overwall 接入，再启动代理服务：
+  // 代理服务启动时会读取 overwall 服务器列表构建 serverList，
+  // 适配器未就绪时 defaultServerId 会回落到官方中继（id=0），
+  // 用户网络直连官方中继超时导致增强模式下 Google 打不开。
+  // 适配器启动失败不阻塞代理：捕获后照常 startup，回落官方路径并在日志里留痕。
+  try {
+    await autoStartAdapter()
+  } catch (e) {
+    log.warn(`[adapter] 自启动流程异常(已跳过，代理服务继续启动): ${e && e.message}`)
+  }
   localApi.startup()
-  // 兜底适配器自启动（fire-and-forget，不阻塞代理服务启动）
-  autoStartAdapter()
 }
 
 export default {
