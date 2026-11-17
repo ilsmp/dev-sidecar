@@ -30,7 +30,7 @@ function applyConf(next) {
   CONF.password = '';
   CONF.upstream = String(next.upstream || 'http://127.0.0.1:7890');
   CONF.upstreamType = String(next.upstreamType || 'auto');
-  CONF.directTimeoutMs = Number(next.directTimeoutMs) || 1000;
+  CONF.directTimeoutMs = Number(next.directTimeoutMs) || 2500;
   CONF.fallbackTimeoutMs = Number(next.fallbackTimeoutMs) || 25000;
   CONF.requestBudgetMs = Number(next.requestBudgetMs) || 30000;
   const arr = Array.isArray(next.directSkipHosts) ? next.directSkipHosts : [];
@@ -160,6 +160,21 @@ const cleanDnsCache = new Map();
 const blockedIps = new Map();
 const directFails = new Map();
 const directSkip = new Map();
+// ---------- 兜底上游死亡追踪: 上游(如 Clash)被关闭时熔断自动失效, 避免"直连被熔断 + 兜底拒绝"双死 ----------
+let upstreamDeadAt = 0; // 上游最近一次确认死亡的时间戳; 0=存活/未知
+function markUpstreamDown() {
+  upstreamDeadAt = Date.now();
+  if (directSkip.size || directFails.size) {
+    directSkip.clear();
+    directFails.clear();
+    log('UPSTREAM-DOWN', '兜底上游连接被拒 -> 清除全部直连熔断, 恢复直连重试');
+  } else {
+    log('UPSTREAM-DOWN', '兜底上游连接被拒(熔断表为空)');
+  }
+}
+function upstreamAlive() {
+  return upstreamDeadAt === 0 || (Date.now() - upstreamDeadAt >= 3000);
+}
 setInterval(() => {
   const now = Date.now();
   for (const [k, v] of dnsCache) { if (now - v.ts > 600000) dnsCache.delete(k); }
@@ -584,9 +599,14 @@ const server = http.createServer(async (req, res) => {
       cur.n += 1; cur.ts = Date.now();
       directFails.set(host, cur);
       if (cur.n >= 3) {
-        directSkip.set(host, Date.now() + 600000);
-        directFails.delete(host);
-        log('DIRECT-SKIP', host, '连续直连失败 -> 10分钟内直接走兜底');
+        if (upstreamAlive()) {
+          directSkip.set(host, Date.now() + 600000);
+          directFails.delete(host);
+          log('DIRECT-SKIP', host, '连续直连失败 -> 10分钟内直接走兜底');
+        } else {
+          directFails.delete(host);
+          log('DIRECT-FAIL', host, '连续直连失败, 但兜底上游不可用 -> 不熔断, 继续直连重试');
+        }
       }
     }
   } else {
@@ -606,7 +626,11 @@ const server = http.createServer(async (req, res) => {
       const upRes = await httpsOver(socketConnect(sock), host, port, req.method, reqPath, headers, bodyBuf, fbTimeout);
       log('FALLBACK', host + reqPath.slice(0, 60), upRes.statusCode, 'direct=' + (directErr ? directErr.message : 'n/a'), 'attempt=' + attempt, Date.now() - t0 + 'ms');
       return relayResponse(upRes, res);
-    } catch (e) { lastErr = e; if (/SSL|packet length|ECONNRESET|socket hang up|timeout/i.test(e && e.message)) { dnsCache.delete(host); cleanDnsCache.delete(host); } }
+    } catch (e) {
+      lastErr = e;
+      if (/ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(e && e.message)) markUpstreamDown();
+      if (/SSL|packet length|ECONNRESET|socket hang up|timeout/i.test(e && e.message)) { dnsCache.delete(host); cleanDnsCache.delete(host); }
+    }
   }
   log('FAIL', host, 'direct=' + (directErr ? directErr.message : 'n/a'), 'fallback=' + (lastErr ? lastErr.message : 'n/a'), Date.now() - t0 + 'ms');
   if (!res.headersSent) res.writeHead(502, { 'content-type': 'text/plain; charset=utf-8' }).end('proxy-suite: direct=' + (directErr ? directErr.message : 'n/a') + '; fallback=' + (lastErr ? lastErr.message : 'n/a'));
@@ -657,9 +681,14 @@ server.on('upgrade', async (req, clientSock, head) => {
         cur.n += 1; cur.ts = Date.now();
         directFails.set(host, cur);
         if (cur.n >= 3) {
-          directSkip.set(host, Date.now() + 600000);
-          directFails.delete(host);
-          log('DIRECT-SKIP', host, '连续直连失败(WS) -> 10分钟内直接走兜底');
+          if (upstreamAlive()) {
+            directSkip.set(host, Date.now() + 600000);
+            directFails.delete(host);
+            log('DIRECT-SKIP', host, '连续直连失败(WS) -> 10分钟内直接走兜底');
+          } else {
+            directFails.delete(host);
+            log('DIRECT-FAIL', host, '连续直连失败(WS), 但兜底上游不可用 -> 不熔断, 继续直连重试');
+          }
         }
       }
     } else {
@@ -670,6 +699,7 @@ server.on('upgrade', async (req, clientSock, head) => {
       log('UPGRADE-FALLBACK', host, 'direct=' + directErrMsg, Date.now() - t0 + 'ms');
       send(s);
     } catch (e2) {
+      if (/ECONNREFUSED|EHOSTUNREACH|ENETUNREACH/i.test(e2 && e2.message)) markUpstreamDown();
       log('UPGRADE-FAIL', host, e2);
       clientSock.destroy();
     }
