@@ -109,6 +109,11 @@
         '*duckduckgo.com': null,
         '*.gstatic.com': null,
         '*.googleapis.com': null,
+        // 本机无 IPv6: 抵消官方远程对 YouTube 视频投递域强制 family 6 的映射,
+        // 否则这些域名解析 AAAA 后 EHOSTUNREACH 并触发内核 null socket 崩溃
+        '*.xn--ngstr-lra8j.com': null,
+        '*.googlevideo.com': null,
+        '*.gvt1.com': null,
       },
       speedTest: {
         dnsProviders: [
@@ -214,6 +219,11 @@
         '2606:50c0:8001::154': null,
         '2606:50c0:8002::154': null,
         '2606:50c0:8003::154': null,
+      },
+      // 官方远程给 *.claude.ai 的预设只有 IPv6 地址, 无 IPv6 环境选中即死;
+      // null 删除标记抵消, claude.ai 改走常规 DNS(增强模式下经适配器, 默认模式直连)
+      '*.claude.ai': {
+        '2a01:4f8:c2c:123f:64:5:a04f:680a': null,
       },
     },
     whiteList: {
