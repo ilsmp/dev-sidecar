@@ -59,6 +59,17 @@ module.exports = {
     {
       from: 'extra',
       to: 'extra',
+      // 排除适配器运行时产物: 开发模式运行会在 extra/adapter 下生成
+      // conf/日志/pid 文件(gitignore 不跟踪), 不加过滤会被整目录扫进安装包,
+      // 导致新装应用的日志页出现开发期旧日志
+      filter: [
+        '**/*',
+        '!adapter/conf.json',
+        '!adapter/adapter.log',
+        '!adapter/adapter.err.log',
+        '!adapter/adapter.out.log',
+        '!adapter/adapter.pid',
+      ],
     },
   ],
   // 按目标架构裁剪 koffi / @starknt 的非目标平台二进制（files 规则不支持 ${arch} 宏，
