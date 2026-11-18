@@ -84,8 +84,6 @@ try {
   log.error('配置加载失败:', e)
 }
 
-let hideDockWhenWinClose = DevSidecar.api.config.get().app.dock.hideWhenWinClose || false
-
 function openDevTools () {
   try {
     log.debug('尝试打开 `开发者工具`')
@@ -453,7 +451,8 @@ function hideWin (reason = '', needCheck = false) {
     }
 
     win.hide()
-    if (isMac && hideDockWhenWinClose) {
+    // 实时读取配置：设置页保存后立即生效，无需重启（修复缓存变量永不更新导致 Dock 隐藏失效）
+    if (isMac && DevSidecar.api.config.get().app.dock.hideWhenWinClose) {
       app.dock.hide()
     }
     winIsHidden = true
@@ -472,12 +471,6 @@ function showWin () {
     app.dock.show()
   }
   winIsHidden = false
-}
-
-function changeAppConfig (config) {
-  if (config.hideDockWhenWinClose != null) {
-    hideDockWhenWinClose = config.hideDockWhenWinClose
-  }
 }
 
 function loadAppIcon () {
@@ -901,7 +894,7 @@ try {
       }
 
       try {
-        const context = { win, app, beforeQuit, quit, ipcMain, dialog, log, api: DevSidecar.api, changeAppConfig }
+        const context = { win, app, beforeQuit, quit, ipcMain, dialog, log, api: DevSidecar.api }
         backend.install(context) // 模块安装
       } catch (err) {
         log.error('install modules error:', err)
