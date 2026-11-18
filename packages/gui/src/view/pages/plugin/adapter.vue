@@ -70,8 +70,11 @@ export default defineComponent({
           .split(/[,\n\r]+/)
           .map(s => s.trim().toLowerCase())
           .filter(Boolean)
-        this.conf.directSkipHosts = hosts
-        this.conf = await this.$api.adapter.confSave(this.conf)
+        // IPC 结构化克隆无法序列化 Vue 响应式 Proxy（直接传 this.conf 会报
+        // "An object could not be cloned"），必须先转成纯 JSON 对象再过桥
+        const plain = JSON.parse(JSON.stringify(this.conf))
+        plain.directSkipHosts = hosts
+        this.conf = await this.$api.adapter.confSave(plain)
         this.directSkipHostsText = (this.conf.directSkipHosts || []).join('\n')
         this.$message.success('配置已保存，自动热生效（改端口时加速服务会自动热重启同步）')
       } catch (e) {
