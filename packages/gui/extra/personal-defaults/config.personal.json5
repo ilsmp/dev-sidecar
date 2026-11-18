@@ -136,6 +136,15 @@
     },
     intercepts: {
       '*.claude.ai': null,
+      // GitHub 资源文件名多数带点(chunkID.hash.js / xxx.module.css), 官方远程配置的
+      // 改写正则 [^./]+ 排除点, 带点资源带真实 SNI 出去被重置, 页面裸渲染(2026-11-18 真因)。
+      // 补一条覆盖带点文件名的改写规则, 顺带覆盖 .map 消除 DevTools 源映射 7 秒挂起。
+      'github.githubassets.com': {
+        '^/assets/.*\\.(js|css|svg|png|gif|jpg|jpeg|ico|woff2?|map|json)(\\?.*)?$': {
+          sni: 'baidu.com',
+          cacheDays: 365,
+        },
+      },
       // GitHub LFS 的 S3 上传域名: 真实 SNI 被 SNI 层阻断, 用 baidu.com 敲门即可正常握手
       // (S3 证书覆盖 *.s3.amazonaws.com, 无需 unVerifySsl), 默认功能直连, 不经兜底适配器
       'github-cloud.s3.amazonaws.com': {
