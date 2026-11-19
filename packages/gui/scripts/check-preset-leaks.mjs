@@ -15,6 +15,8 @@ const sensitive = new RegExp(process.argv[2] || 'google|gstatic|ggpht|ytimg|yout
 let sensitiveLeaks = 0
 let infoLeaks = 0
 for (const [key, ips] of Object.entries(rp)) {
+  // 整键 null = 用户层删除该远程键(结构性封堵), 视为全部抵消
+  if (up[key] === null) continue
   const uv = up[key] || {}
   const leaked = Object.entries(ips || {}).filter(([ip, on]) => on === true && uv[ip] !== false && uv[ip] !== null).map(([ip]) => ip)
   if (!leaked.length) continue

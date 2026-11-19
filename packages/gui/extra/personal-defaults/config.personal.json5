@@ -173,18 +173,11 @@
       enabled: true,
     },
     preSetIpList: {
-      '^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$': {
-        '8.137.102.117': true,
-      },
       'stitch.withgoogle.com': {
         '8.137.102.117': true,
       },
       'miyun.io': {
         '104.21.74.96': true,
-      },
-      '^(?!fonts).*(with)?google(apis|usercontent)?.com.*$': {
-        '8.137.102.117': true,
-        '142.251.189.206': false,
       },
       '^.*(youtube.com|gstatic.com|youtube.nocookie.com|youtu.be|ggpht.com|i.ytimg.com|blogger.com|doodles.google|about.google|android.com|antigravity.google)$': {
         '8.137.102.117': true,
@@ -219,32 +212,30 @@
         '185.199.109.215': true,
         '185.199.110.215': true,
         '185.199.111.215': true,
-        // null 删除标记: 抵消官方远程配置里的 IPv6 预设(本机无 IPv6, 选中即
-        // EHOSTUNREACH 并触发内核 null socket 崩溃, 见 2026-11-18 排查)
-        '2606:50c0:8000::154': null,
-        '2606:50c0:8001::154': null,
-        '2606:50c0:8002::154': null,
-        '2606:50c0:8003::154': null,
       },
-      // 官方远程给 *.claude.ai 的预设只有 IPv6 地址, 无 IPv6 环境选中即死;
-      // null 删除标记抵消, claude.ai 改走常规 DNS(增强模式下经适配器, 默认模式直连)
-      '*.claude.ai': {
-        '2a01:4f8:c2c:123f:64:5:a04f:680a': null,
+    },
+    // 地域自适应预设(2026-11-19): 内核探测直连出口地域落在
+    // regionPolicy.restrictedRegions 时, 以下家族使用中继池(白名单语义,
+    // 不受官方远程预设增删影响, 无抵消标记被合并写回消耗的问题); 出口不在
+    // 受限地域时(如海外环境)落回官方/远程预设直连, 不绕道中继。
+    preSetIpListRelay: {
+      '^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$': {
+        '8.137.102.117': true,
       },
-      // 官方远程给 account/scholar 系域名配的是 Google 真实节点 IP, 直连时出口为
-      // 本机地域, Google 的 AI 模式资格判定据此偶发拒绝(2026-11-19)。改为香港
-      // 中继并 null 抵消真实节点 IP, 与 google 家族其余域名出口保持一致。
+      '^(?!fonts).*(with)?google(apis|usercontent)?.com.*$': {
+        '8.137.102.117': true,
+      },
       '(*account*|scholar).google.com': {
         '8.137.102.117': true,
-        '172.217.204.206': null,
-        '142.251.189.206': null,
       },
       'scholar.googleusercontent.com': {
         '8.137.102.117': true,
-        '142.251.190.206': null,
-        '172.217.204.206': null,
-        '172.253.122.206': null,
       },
+    },
+    regionPolicy: {
+      restrictedRegions: ['CN'],
+      ttlMs: 1800000,
+      defaultRestricted: true,
     },
     whiteList: {
       '*.bigmodel.cn': true,
