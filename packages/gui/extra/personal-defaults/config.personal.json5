@@ -1,232 +1,247 @@
-// 个人默认配置模板 —— 2026-11-19 由当前验证可用的活配置固化生成
-// 安装时种入用户层(~/.dev-sidecar/config.json), 合并优先级最高, 不被远程覆盖。
-// 注意: 固化为全量快照后, 官方远程配置的未来更新不会自动生效(用户层优先);
-// 如需吸收官方更新, 用 scripts/check-preset-leaks.mjs 审计后重新固化。
-// 地域自适应: regionPolicy 探测直连出口, CN 时 google 系走 preSetIpListRelay 中继池,
-// 非受限地域落回本文件 preSetIpList(即当前固化的官方预设快照)。
 {
-  "plugin": {
-    "node": {
-      "enabled": true
+  plugin: {
+    node: {
+      enabled: true,
     },
-    "git": {
-      "enabled": true
+    git: {
+      enabled: true,
     },
-    "overwall": {
-      "targets": {
-        "^(?:[\\w-]+\\.)*(?:github[\\w-]*\\.(?:com|io|dev)|ghcr\\.io)$": false,
-        "github.com": false,
-        "*.github.com": false,
-        "*github*.com": false,
-        "*.githubusercontent.com": false,
-        "*.githubassets.com": false,
-        "*.github.io": false,
-        "(*account*|scholar).google.com": false,
-        "scholar.googleusercontent.com": false,
-        "github-cloud.s3.amazonaws.com": false,
-        "*.chatgpt.com": true,
-        "*.openai.com": true,
-        "auth.openai.com": true,
-        "auth0.openai.com": true,
-        "*.oaistatic.com": true,
-        "claude.ai": true,
-        "*.claude.ai": true,
-        "*.anthropic.com": true,
-        "api.anthropic.com": true,
-        "*.googleapis.com": false,
-        "*.gstatic.com": false,
-        "*.google-analytics.com": false,
-        "*.googleusercontent.com": false,
-        "chatgpt.com": true,
-        "openai.com": true,
-        "^(?!fonts).*(with)?google(apis|usercontent)?.com.*$": false,
-        "^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$": false
+    overwall: {
+      targets: {
+        '^(?:[\\w-]+\\.)*(?:github[\\w-]*\\.(?:com|io|dev)|ghcr\\.io)$': false,
+        'github.com': false,
+        '*.github.com': false,
+        '*github*.com': false,
+        '*.githubusercontent.com': false,
+        '*.githubassets.com': false,
+        '*.github.io': false,
+        // account/scholar 系会命中 pac.txt 被增强模式劫持到适配器「直连优先」,
+        // 真实 SNI 直连偶被 GFW 放行时出口为本机地域, AI 模式间歇报地域拒绝
+        // (2026-11-19)。显式 false 跳过增强(github.com 同例), 回香港中继直连路径,
+        // 出口与 google 家族一致。
+        '(*account*|scholar).google.com': false,
+        'scholar.googleusercontent.com': false,
+        // GitHub LFS 上传走 S3, 显式排除增强模式, 由默认功能(SNI 改写)直连
+        'github-cloud.s3.amazonaws.com': false,
+        '*.chatgpt.com': true,
+        '*.openai.com': true,
+        'auth.openai.com': true,
+        'auth0.openai.com': true,
+        '*.oaistatic.com': true,
+        'claude.ai': true,
+        '*.claude.ai': true,
+        '*.anthropic.com': true,
+        'api.anthropic.com': true,
+        '*.googleapis.com': false,
+        '*.gstatic.com': false,
+        '*.google-analytics.com': false,
+        '*.googleusercontent.com': false,
+        'chatgpt.com': true,
+        'openai.com': true,
       },
-      "enabled": true
+      enabled: true,
+      pac: {
+        enabled: true,
+        autoUpdate: true,
+      },
     },
-    "pip": {}
+    pip: {},
   },
-  "proxy": {
-    "proxyHttp": true,
-    "setEnv": true,
-    "excludeIpList": {
-      "*.miyun.io": false,
-      "*.sigs.k8s.io": false,
-      "*.elastic.co": true,
-      "objects-origin.githubusercontent.com": null
-    }
-  },
-  "app": {
-    "autoStart": {
-      "enabled": true
+  proxy: {
+    excludeDomesticDomainAllowList: true,
+    proxyHttp: true,
+    setEnv: true,
+    excludeIpList: {
+      '*.miyun.io': false,
+      '*.sigs.k8s.io': false,
+      '*.elastic.co': true,
+      'objects-origin.githubusercontent.com': null,
     },
-    "autoChecked": false,
-    "dock": {
-      "hideWhenWinClose": true
-    },
-    "theme": "system",
-    "closeStrategy": 2,
-    "showShutdownTip": false,
-    "mode": "ow"
   },
-  "server": {
-    "dns": {
-      "ech": {
-        "domains": [
-          "*t.co",
-          "*twitter.com",
-          "*twimg.com",
-          "*sci-hub.pub",
-          "^(.+.)?x.com$",
-          "*matrix.org",
-          "*mod.io",
-          "*itch.io",
-          "*patreon.com",
-          "*substack.com",
-          "*medium.com",
-          "*v2ex.com",
-          "auth.docker.io",
-          "hub.docker.com",
-          "*pixiv.net",
-          "*civitai.com",
-          "*civitai.red",
-          "*ldstatic.com",
-          "civitai.com",
-          "*linux.do",
-          "greasyfork.org"
-        ]
-      },
-      "mapping": {
-        "*.openai.com": "cf-DoT",
-        "auth.openai.com": "cf-DoT",
-        "*.oaiusercontent.com": "cf-DoT",
-        "*.claude.ai": "cf-DoT",
-        "*.anthropic.com": "cf-DoT",
-        "*.google.com": "cf-DoT",
-        "*.googleapis.com": "cf-DoT",
-        "*.googleusercontent.com": "cf-DoT",
-        "*.gstatic.com": "cf-DoT"
-      },
-      "familyMapping": {
-        "*.xn--ngstr-lra8j.com": null,
-        "*.googlevideo.com": null,
-        "*.gvt1.com": null,
-        "*.github.com": null,
-        "*github*.com": null,
-        "*duckduckgo.com": null,
-        "*.gstatic.com": null,
-        "*.googleapis.com": null
-      },
-      "speedTest": {
-        "dnsProviders": [
-          "local",
-          "aliyun",
-          "safe360",
-          "cf-DoT",
-          "bebasid",
-          "cf-DoH",
-          "quad9-ip",
-          "cf-ip",
-          "rubyfish"
+  app: {
+    autoStart: {
+      enabled: true,
+    },
+    autoChecked: false,
+    dock: {
+      hideWhenWinClose: true,
+    },
+    theme: 'system',
+    closeStrategy: 2,
+    showShutdownTip: false,
+    mode: 'ow',
+  },
+  server: {
+    dns: {
+      ech: {
+        domains: [
+          '*t.co',
+          '*twitter.com',
+          '*twimg.com',
+          '*sci-hub.pub',
+          '^(.+.)?x.com$',
+          '*matrix.org',
+          '*mod.io',
+          '*itch.io',
+          '*patreon.com',
+          '*substack.com',
+          '*medium.com',
+          '*v2ex.com',
+          'auth.docker.io',
+          'hub.docker.com',
+          '*pixiv.net',
+          '*civitai.com',
+          '*civitai.red',
+          '*ldstatic.com',
+          'civitai.com',
+          '*linux.do',
+          'greasyfork.org',
         ],
-        "hostnameList": [
-          "miyun.io",
-          "minikube.sigs.k8s.io",
-          "api.github.com",
-          "collector.github.com",
-          "githubusercontent.com",
-          "google.com.hk",
-          "google.com",
-          "github.com"
-        ]
-      }
+      },
+      mapping: {
+        '*.openai.com': 'cf-DoT',
+        'auth.openai.com': 'cf-DoT',
+        '*.oaiusercontent.com': 'cf-DoT',
+        '*.claude.ai': 'cf-DoT',
+        '*.anthropic.com': 'cf-DoT',
+        '*.google.com': 'cf-DoT',
+        '*.googleapis.com': 'cf-DoT',
+        '*.googleusercontent.com': 'cf-DoT',
+        '*.gstatic.com': 'cf-DoT',
+      },
+      familyMapping: {
+        '*.github.com': null,
+        '*github*.com': null,
+        '*duckduckgo.com': null,
+        '*.gstatic.com': null,
+        '*.googleapis.com': null,
+        // 本机无 IPv6: 抵消官方远程对 YouTube 视频投递域强制 family 6 的映射,
+        // 否则这些域名解析 AAAA 后 EHOSTUNREACH 并触发内核 null socket 崩溃
+        '*.xn--ngstr-lra8j.com': null,
+        '*.googlevideo.com': null,
+        '*.gvt1.com': null,
+      },
+      speedTest: {
+        dnsProviders: [
+          'local',
+          'aliyun',
+          'safe360',
+          'cf-DoT',
+          'bebasid',
+          'cf-DoH',
+          'quad9-ip',
+          'cf-ip',
+          'rubyfish',
+        ],
+        hostnameList: [
+          'miyun.io',
+          'minikube.sigs.k8s.io',
+          'api.github.com',
+          'collector.github.com',
+          'githubusercontent.com',
+          'google.com.hk',
+          'google.com',
+          'github.com',
+        ],
+      },
     },
-    "intercepts": {
-      "github.githubassets.com": {
-        "^/assets/.*\\.(js|css|svg|png|gif|jpg|jpeg|ico|woff2?|map|json)(\\?.*)?$": {
-          "sni": "baidu.com",
-          "cacheDays": 365
-        }
+    intercepts: {
+      '*.claude.ai': null,
+      // GitHub 资源文件名多数带点(chunkID.hash.js / xxx.module.css), 官方远程配置的
+      // 改写正则 [^./]+ 排除点, 带点资源带真实 SNI 出去被重置, 页面裸渲染(2026-11-18 真因)。
+      // 补一条覆盖带点文件名的改写规则, 顺带覆盖 .map 消除 DevTools 源映射 7 秒挂起。
+      'github.githubassets.com': {
+        '^/assets/.*\\.(js|css|svg|png|gif|jpg|jpeg|ico|woff2?|map|json)(\\?.*)?$': {
+          sni: 'baidu.com',
+          cacheDays: 365,
+        },
       },
-      "github-cloud.s3.amazonaws.com": {
-        ".*": {
-          "sni": "baidu.com"
-        }
+      // GitHub LFS 的 S3 上传域名: 真实 SNI 被 SNI 层阻断, 用 baidu.com 敲门即可正常握手
+      // (S3 证书覆盖 *.s3.amazonaws.com, 无需 unVerifySsl), 默认功能直连, 不经兜底适配器
+      'github-cloud.s3.amazonaws.com': {
+        '.*': {
+          sni: 'baidu.com',
+        },
       },
-      "*.claude.ai": null
     },
-    "setting": {
-      "tlsVersionMapping": {}
+    setting: {
+      tlsVersionMapping: {},
     },
-    "cloudflareRoute": {
-      "mode": "blacklist",
-      "domains": {},
-      "enabled": true
+    cloudflareRoute: {
+      mode: 'blacklist',
+      domains: {},
+      enabled: true,
     },
-    "preSetIpList": {
-      "stitch.withgoogle.com": {
-        "8.137.102.117": true
+    preSetIpList: {
+      'stitch.withgoogle.com': {
+        '8.137.102.117': true,
       },
-      "miyun.io": {
-        "104.21.74.96": true
+      'miyun.io': {
+        '104.21.74.96': true,
       },
-      "^.*(youtube.com|gstatic.com|youtube.nocookie.com|youtu.be|ggpht.com|i.ytimg.com|blogger.com|doodles.google|about.google|android.com|antigravity.google)$": {
-        "8.137.102.117": true,
-        "142.251.189.206": false
+      '^.*(youtube.com|gstatic.com|youtube.nocookie.com|youtu.be|ggpht.com|i.ytimg.com|blogger.com|doodles.google|about.google|android.com|antigravity.google)$': {
+        '8.137.102.117': true,
+        '142.251.189.206': false,
       },
-      "*.youtube.com": {
-        "8.137.102.117": true
+      '*.youtube.com': {
+        '8.137.102.117': true,
       },
-      "*.youtu.be": {
-        "8.137.102.117": true
+      '*.youtu.be': {
+        '8.137.102.117': true,
       },
-      "*.youtube-nocookie.com": {
-        "8.137.102.117": true
+      '*.youtube-nocookie.com': {
+        '8.137.102.117': true,
       },
-      "*.ggpht.com": {
-        "8.137.102.117": true
+      '*.ggpht.com': {
+        '8.137.102.117': true,
       },
-      "i.ytimg.com": {
-        "8.137.102.117": true
+      'i.ytimg.com': {
+        '8.137.102.117': true,
       },
-      "*.gstatic.com": {
-        "8.137.102.117": true
+      '*.gstatic.com': {
+        '8.137.102.117': true,
       },
-      "github.githubassets.com": {
-        "185.199.108.215": true,
-        "185.199.109.215": true,
-        "185.199.110.215": true,
-        "185.199.111.215": true
-      }
+      // GitHub 静态资源 CDN: 用户层整键覆盖远程预设表, 在官方 .154 组基础上
+      // 并入实时 DNS 返回的 .215 组, 扩大轮换池以抵御单组 Fastly IP 间歇性阻断
+      'github.githubassets.com': {
+        '185.199.108.154': true,
+        '185.199.109.154': true,
+        '185.199.110.154': true,
+        '185.199.111.154': true,
+        '185.199.108.215': true,
+        '185.199.109.215': true,
+        '185.199.110.215': true,
+        '185.199.111.215': true,
+      },
     },
-    "preSetIpListRelay": {
-      "^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$": {
-        "8.137.102.117": true
+    // 地域自适应预设(2026-11-19): 内核探测直连出口地域落在
+    // regionPolicy.restrictedRegions 时, 以下家族使用中继池(白名单语义,
+    // 不受官方远程预设增删影响, 无抵消标记被合并写回消耗的问题); 出口不在
+    // 受限地域时(如海外环境)落回官方/远程预设直连, 不绕道中继。
+    preSetIpListRelay: {
+      '^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$': {
+        '8.137.102.117': true,
       },
-      "^(?!fonts).*(with)?google(apis|usercontent)?.com.*$": {
-        "8.137.102.117": true
+      '^(?!fonts).*(with)?google(apis|usercontent)?.com.*$': {
+        '8.137.102.117': true,
       },
-      "(*account*|scholar).google.com": {
-        "8.137.102.117": true
+      '(*account*|scholar).google.com': {
+        '8.137.102.117': true,
       },
-      "scholar.googleusercontent.com": {
-        "8.137.102.117": true
-      }
+      'scholar.googleusercontent.com': {
+        '8.137.102.117': true,
+      },
     },
-    "regionPolicy": {
-      "restrictedRegions": [
-        "CN"
-      ],
-      "probes": [
-        "https://ipinfo.io/json",
-        "https://ipapi.co/json/",
-        "http://ip-api.com/json"
-      ],
-      "ttlMs": 1800000,
-      "defaultRestricted": true
+    regionPolicy: {
+      restrictedRegions: ['CN'],
+      // ipinfo 在国内直连可达且返回 country_code, 作首选探测源;
+      // 全部失败时按 defaultRestricted 保守走中继
+      probes: ['https://ipinfo.io/json', 'https://ipapi.co/json/', 'http://ip-api.com/json'],
+      ttlMs: 1800000,
+      defaultRestricted: true,
     },
-    "whiteList": {
-      "*.bigmodel.cn": true
-    }
-  }
+    whiteList: {
+      '*.bigmodel.cn': true,
+    },
+  },
 }
