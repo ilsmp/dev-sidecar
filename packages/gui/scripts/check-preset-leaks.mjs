@@ -11,12 +11,16 @@ const remote = jsonApi.parse(fs.readFileSync(path.join(base, 'remote_config.json
 const user = JSON.parse(fs.readFileSync(path.join(base, 'config.json'), 'utf8')) || {}
 const rp = (remote.server && remote.server.preSetIpList) || {}
 const up = (user.server && user.server.preSetIpList) || {}
+// 地域自适应中继池(白名单)覆盖的键: 受限地域走中继、非受限地域用官方预设
+// 均属预期, 不计为泄漏
+const relay = (user.server && user.server.preSetIpListRelay) || {}
 const sensitive = new RegExp(process.argv[2] || 'google|gstatic|ggpht|ytimg|youtube|youtu\\.be|googleusercontent|googleapis|account', 'i')
 let sensitiveLeaks = 0
 let infoLeaks = 0
 for (const [key, ips] of Object.entries(rp)) {
   // 整键 null = 用户层删除该远程键(结构性封堵), 视为全部抵消
   if (up[key] === null) continue
+  if (relay[key]) continue
   const uv = up[key] || {}
   const leaked = Object.entries(ips || {}).filter(([ip, on]) => on === true && uv[ip] !== false && uv[ip] !== null).map(([ip]) => ip)
   if (!leaked.length) continue
