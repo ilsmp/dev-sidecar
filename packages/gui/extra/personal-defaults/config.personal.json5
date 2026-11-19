@@ -45,6 +45,13 @@
         // 兜底, 即使这两条被误删/被远程配置冲掉, pac.txt 也无法把中继白名单家族劫持走。
         '^(?!fonts).*(with)?google(apis|usercontent)?.com.*$': false,
         '^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$': false,
+        // 精确主机级 false: 合并后用户键排在远程键之前, 正则层远程新增 true 会被上面的宽匹配
+        // 正则先命中而失效; 但远程若新增「精确主机」true, 会在 origin 快速匹配层先于正则被
+        // 取到(2026-11-19 覆盖性证明实验)。对 AI 模式关键主机补精确 false 堵死该路径。
+        'www.google.com': false,
+        'www.google.com.hk': false,
+        'gemini.google.com': false,
+        'accounts.google.com': false,
         'chatgpt.com': true,
         'openai.com': true,
       },
