@@ -15,6 +15,12 @@
         '*.githubusercontent.com': false,
         '*.githubassets.com': false,
         '*.github.io': false,
+        // account/scholar 系会命中 pac.txt 被增强模式劫持到适配器「直连优先」,
+        // 真实 SNI 直连偶被 GFW 放行时出口为本机地域, AI 模式间歇报地域拒绝
+        // (2026-11-19)。显式 false 跳过增强(github.com 同例), 回香港中继直连路径,
+        // 出口与 google 家族一致。
+        '(*account*|scholar).google.com': false,
+        'scholar.googleusercontent.com': false,
         // GitHub LFS 上传走 S3, 显式排除增强模式, 由默认功能(SNI 改写)直连
         'github-cloud.s3.amazonaws.com': false,
         '*.chatgpt.com': true,
@@ -224,6 +230,20 @@
       // null 删除标记抵消, claude.ai 改走常规 DNS(增强模式下经适配器, 默认模式直连)
       '*.claude.ai': {
         '2a01:4f8:c2c:123f:64:5:a04f:680a': null,
+      },
+      // 官方远程给 account/scholar 系域名配的是 Google 真实节点 IP, 直连时出口为
+      // 本机地域, Google 的 AI 模式资格判定据此偶发拒绝(2026-11-19)。改为香港
+      // 中继并 null 抵消真实节点 IP, 与 google 家族其余域名出口保持一致。
+      '(*account*|scholar).google.com': {
+        '8.137.102.117': true,
+        '172.217.204.206': null,
+        '142.251.189.206': null,
+      },
+      'scholar.googleusercontent.com': {
+        '8.137.102.117': true,
+        '142.251.190.206': null,
+        '172.217.204.206': null,
+        '172.253.122.206': null,
       },
     },
     whiteList: {
