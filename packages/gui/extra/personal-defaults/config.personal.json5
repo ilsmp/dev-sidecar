@@ -36,6 +36,15 @@
         '*.gstatic.com': false,
         '*.google-analytics.com': false,
         '*.googleusercontent.com': false,
+        // google 全家族显式关闭增强: www.google.com / www.google.com.hk / gemini / aistudio /
+        // apis / console.cloud / notebooklm / mail 等都会命中 pac.txt(gfwlist)。一旦被增强劫持,
+        // 请求就转发到本地适配器及其上游 VPN, 出口地域随 VPN 节点漂移; 漂到 CN 时 AI 模式报
+        // 「您的设备或账号目前无法使用 AI 模式」, 且只在适配器死亡退避窗口内才恢复, 表现为
+        // 间歇性故障(2026-11-19 定位)。关闭增强后这些域名走 regionPolicy + preSetIpListRelay
+        // 的预设中继直连路径, 出口稳定在中继节点。内核另有中继守卫(overwall.js relayGuard)
+        // 兜底, 即使这两条被误删/被远程配置冲掉, pac.txt 也无法把中继白名单家族劫持走。
+        '^(?!fonts).*(with)?google(apis|usercontent)?.com.*$': false,
+        '^(aistudio|.*pa.clients6|apis|gemini|console.cloud|notebooklm|mail).google.com$': false,
         'chatgpt.com': true,
         'openai.com': true,
       },
