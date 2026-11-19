@@ -234,6 +234,9 @@
     },
     regionPolicy: {
       restrictedRegions: ['CN'],
+      // ipinfo 在国内直连可达且返回 country_code, 作首选探测源;
+      // 全部失败时按 defaultRestricted 保守走中继
+      probes: ['https://ipinfo.io/json', 'https://ipapi.co/json/', 'http://ip-api.com/json'],
       ttlMs: 1800000,
       defaultRestricted: true,
     },
